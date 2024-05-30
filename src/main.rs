@@ -5,13 +5,12 @@ mod translation;
 
 use spargebra::algebra::GraphPattern;
 use spargebra::Query;
-use solutions::Solution;
 
 fn _test_parsing() {
     let query_str = "
         prefix s: <https://xxx#>
 
-        SELECT ?s
+        SELECT DISTINCT (?s + 1 AS ?x)
         WHERE {
             ?s <https://p> s:a .
             ?s ?p ?o .
@@ -31,11 +30,12 @@ fn _test_parsing() {
     println!("{}", query.to_string());
     println!("{}", query.to_sse());
 
+    println!("{:#?}", query);
+
     println!("{:#?}", match &query {
         Query::Select { pattern: GraphPattern::Project {inner, .. }, .. } => inner,
         _ => panic!("Unexpected pattern")
     });
-    println!("{:#?}", query);
 }
 
 
@@ -53,21 +53,20 @@ fn _test_rust(){
 
 
 fn _test_translation(){
-    let _query_str = "
+    let query_str = "
         prefix ex: <https://example.com/>
 
-        SELECT ?object
+        SELECT DISTINCT *
         WHERE {
-            ?subject ex:p ?object .
-            ?subject ex:p ex:o .
+            ?subject ex:p2 ?object .
         }
     ";
 
-    let query_str = "
+    let _query_str = "
     PREFIX book: <http://example.org/book/>
 PREFIX author: <http://example.org/author/>
 
-SELECT ?title
+SELECT DISTINCT ?title
 WHERE {
   ?book book:hasTitle ?title .
   ?book book:writtenBy ?author .
@@ -96,5 +95,5 @@ WHERE {
 
 
 fn main() {
-    _test_parsing();
+    _test_translation();
 }

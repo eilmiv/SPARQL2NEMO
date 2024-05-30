@@ -4,12 +4,13 @@ use crate::solutions::Solution;
 #[derive(Debug)]
 pub struct State {
     text: String,
-    predicate_names: Vec<String>
+    predicate_names: Vec<String>,
+    var_id_counter: u32,
 }
 
 impl State {
     pub fn new() -> State {
-        State{text: String::from(""), predicate_names: Vec::new()}
+        State{text: String::from(""), predicate_names: Vec::new(), var_id_counter: 0}
     }
 
     pub fn predicate(&mut self, name: &str) -> String {
@@ -21,6 +22,16 @@ impl State {
         }
         self.predicate_names.push(result.clone());
         result
+    }
+
+    pub fn var(&mut self, name: &str) -> String {
+        self.var_id_counter += 1;
+        let c = self.var_id_counter;
+        format!("{name}_{c}")
+    }
+
+    pub fn count_var(&mut self) -> String {
+        self.var("MULTIPLICITY_VAR")
     }
 
     fn has_predicate(&self, name: &String) -> bool{

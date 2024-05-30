@@ -8,6 +8,7 @@ pub enum TranslateError {
     ParseError(ParseError),
     QueryNotImplemented(Query),
     PatternNotImplemented(GraphPattern),
+    MultiPatternNotImplemented(GraphPattern),
     TermNotImplemented(TermPattern),
     Todo(&'static str),
 }
