@@ -59,6 +59,7 @@ fn _test_translation(){
         SELECT DISTINCT *
         WHERE {
             ?subject ex:p2 ?object .
+            FILTER(str(?subject)) .
         }
     ";
 

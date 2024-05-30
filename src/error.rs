@@ -1,5 +1,5 @@
 use spargebra::{ParseError, Query};
-use spargebra::algebra::GraphPattern;
+use spargebra::algebra::{Expression, Function, GraphPattern};
 use spargebra::term::TermPattern;
 
 #[derive(Debug)]
@@ -10,6 +10,9 @@ pub enum TranslateError {
     PatternNotImplemented(GraphPattern),
     MultiPatternNotImplemented(GraphPattern),
     TermNotImplemented(TermPattern),
+    ExpressionNotImplemented(Expression),
+    InvalidNumberOfArguments(Function, Vec<Expression>),
+    FunctionNotImplemented(Function),
     Todo(&'static str),
 }
 

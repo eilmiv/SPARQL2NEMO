@@ -34,6 +34,10 @@ impl State {
         self.var("MULTIPLICITY_VAR")
     }
 
+    pub fn expr_var(&mut self) -> String {
+        self.var("EXPRESSION_VAR")
+    }
+
     fn has_predicate(&self, name: &String) -> bool{
         self.predicate_names.contains(name)
     }
