@@ -1,14 +1,16 @@
 use std::collections::HashMap;
-use spargebra::algebra::{Expression, Function, GraphPattern};
+use spargebra::algebra::{Expression, Function, GraphPattern, PropertyPathExpression};
 use spargebra::term::{Literal, NamedNode, NamedNodePattern, TermPattern, TriplePattern, Variable};
 use spargebra::Query;
 use crate::error::TranslateError;
 use crate::error::TranslateError::{ExpressionNotImplemented, FunctionNotImplemented, InvalidNumberOfArguments, MultiPatternNotImplemented, PatternNotImplemented, QueryNotImplemented, TermNotImplemented};
 use crate::solutions;
-use crate::solutions::{format_solution, Solution, SolutionMapping, SolutionMultiMapping, SolutionMulti, format_solution_mapped, SolutionExpression, expression_variables};
+use crate::solutions::{expression_variables, expression_vars_n, format_solution, format_solution_mapped, format_solution_path, Solution, SolutionExpression, SolutionMapping, SolutionMulti, SolutionMultiMapping, SolutionPath};
 use crate::state::State;
 
 const GRAPH_NAME: &str = "input_graph";
+const TRUE: &'static str = "\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>";
+const FALSE: &'static str = "\"false\"^^<http://www.w3.org/2001/XMLSchema#boolean>";
 
 fn translate_expression_variable(state: &mut State, var: &Variable, binding: &dyn Solution) -> Result<SolutionExpression, TranslateError>{
     let var_str = var.as_str().to_string();
@@ -45,7 +47,7 @@ fn translate_or(state: &mut State, left: &Expression, right: &Expression, bindin
     let left_bool = translate_smart_effective_boolean_value(state, left_solution, left)?;
     let right_bool = translate_smart_effective_boolean_value(state, right_solution, right)?;
     let vars = expression_variables(&left_bool, &right_bool);
-    let solution = SolutionExpression::new(state, "or", vars);
+    let solution = SolutionExpression::new(state, "boolean_or", vars);
     let map = HashMap::from(
         [(solution.result(), format!("OR(?{}, ?{})", left_bool.result(), right_bool.result()))]
     );
@@ -62,7 +64,7 @@ fn translate_and(state: &mut State, left: &Expression, right: &Expression, bindi
     let left_bool = translate_smart_effective_boolean_value(state, left_solution, left)?;
     let right_bool = translate_smart_effective_boolean_value(state, right_solution, right)?;
     let vars = expression_variables(&left_bool, &right_bool);
-    let solution = SolutionExpression::new(state, "and", vars);
+    let solution = SolutionExpression::new(state, "boolean_and", vars);
     let map = HashMap::from(
         [(solution.result(), format!("AND(?{}, ?{})", left_bool.result(), right_bool.result()))]
     );
@@ -76,7 +78,7 @@ fn translate_and(state: &mut State, left: &Expression, right: &Expression, bindi
 fn translate_not(state: &mut State, inner: &Expression, binding: &dyn Solution) -> Result<SolutionExpression, TranslateError>{
     let inner_solution = translate_expression(state, inner, binding)?;
     let inner_bool = translate_smart_effective_boolean_value(state, inner_solution, inner)?;
-    let solution = SolutionExpression::new(state, "not", inner_bool.external_vars());
+    let solution = SolutionExpression::new(state, "boolean_not", inner_bool.external_vars());
     let map = HashMap::from(
         [(solution.result(), format!("NOT(?{})", inner_bool.result()))]
     );
@@ -133,6 +135,62 @@ fn translate_in(state: &mut State, val: &Expression, list: &Vec<Expression>, bin
     Ok(solution)
 }
 
+fn translate_positive_exists(state: &mut State, pattern: &GraphPattern, binding: &dyn Solution) -> Result<SolutionExpression, TranslateError>{
+    let inner_solution = translate_pattern(state, pattern)?;
+    let vars = inner_solution.vars().iter().map(|s| s.to_string()).filter(|v| binding.vars().contains(v)).collect();
+    let solution = SolutionExpression::new(state, "partial_exists", vars);
+    let head = format_solution_mapped(&solution, HashMap::from([(solution.result(), TRUE.to_string())]));
+    let inner_body = format_solution(&inner_solution);
+    let binding_body = format_solution(binding);
+
+    state.add_line(format!("{head} :- {binding_body}, {inner_body}"));
+
+    Ok(solution)
+}
+
+fn translate_exists(state: &mut State, pattern: &GraphPattern, binding: &dyn Solution) -> Result<SolutionExpression, TranslateError>{
+    let partial_exists = translate_positive_exists(state, pattern, binding)?;
+    let solution = SolutionExpression::new(state, "exists", partial_exists.external_vars());
+
+    state.add_line(format!(
+        "{} :- {}",
+        format_solution_mapped(&solution, HashMap::from([(solution.result(), TRUE.to_string())])),
+        format_solution(&partial_exists),
+    ));
+    state.add_line(format!(
+        "{} :- {}, ~{}",
+        format_solution_mapped(&solution, HashMap::from([(solution.result(), FALSE.to_string())])),
+        format_solution(binding),
+        format_solution(&partial_exists),
+    ));
+
+    Ok(solution)
+}
+
+fn translate_if(state: &mut State, condition: &Expression, true_val: &Expression, false_val: &Expression, binding: &dyn Solution) -> Result<SolutionExpression, TranslateError>{
+    let condition_solution = translate_expression(state, condition, binding)?;
+    let condition_bool = translate_smart_effective_boolean_value(state, condition_solution, condition)?;
+    let true_solution = translate_expression(state, true_val, binding)?;
+    let false_solution = translate_expression(state, false_val, binding)?;
+    let solution = SolutionExpression::new(state, "if", expression_vars_n(&vec![condition_bool.clone(), true_solution.clone(), false_solution.clone()]));
+
+    state.add_line(format!(
+        "{} :- {}, {}, {}",
+        format_solution_mapped(&solution, HashMap::from([(solution.result(), format!("?{}", true_solution.result()))])),
+        format_solution(binding),
+        format_solution(&true_solution),
+        format_solution_mapped(&condition_bool, HashMap::from([(condition_bool.result(), TRUE.to_string())]))
+    ));
+    state.add_line(format!(
+        "{} :- {}, {}, {}",
+        format_solution_mapped(&solution, HashMap::from([(solution.result(), format!("?{}", false_solution.result()))])),
+        format_solution(binding),
+        format_solution(&false_solution),
+        format_solution_mapped(&condition_bool, HashMap::from([(condition_bool.result(), FALSE.to_string())]))
+    ));
+    Ok(solution)
+}
+
 fn translate_by_cases(state: &mut State, left: &Expression, right: &Expression, binding: &dyn Solution, predicate: &str, cases: Vec<(&str, &str, &str, &str)>) -> Result<SolutionExpression, TranslateError>{
     let left_solution = translate_expression(state, left, binding)?;
     let right_solution = translate_expression(state, right, binding)?;
@@ -155,18 +213,7 @@ fn translate_by_cases(state: &mut State, left: &Expression, right: &Expression, 
 fn translate_nary_function(state: &mut State, params: Vec<&Expression>, binding: &dyn Solution, func: &str) -> Result<SolutionExpression, TranslateError>{
     let solution_results: Result<Vec<_>, _> = params.iter().map(|p| translate_expression(state, p, binding)).collect();
     let solutions = solution_results?;
-    let special_vars: Vec<String> = solutions.iter().map(|s| s.result()).collect();
-
-    let mut vars: Vec<String> = solutions.iter()
-        .map(|s| s.vars())
-        .flatten()
-        .map(|s| s.to_string())
-        .filter(|v| !special_vars.contains(v))
-        .collect();
-    vars.sort();
-    vars.dedup();
-
-    let solution = SolutionExpression::new(state, func.to_lowercase().as_str(), vars);
+    let solution = SolutionExpression::new(state, func.to_lowercase().as_str(), solutions::expression_vars_n(&solutions));
 
     let mut body = format_solution(binding);
     for s in &solutions {
@@ -254,7 +301,7 @@ fn translate_function(state: &mut State, func: &Function, params: &Vec<Expressio
         },
         [left, right] => match func {
             Function::Str => translate_binary_function(state, left, right, binding, "str", ("CONCAT(", ", ", ")")),
-            Function::SubStr => translate_binary_function(state, left, right, binding, "substr", ("SUBSTR(", ", ", ")")),
+            Function::SubStr => translate_binary_function(state, left, right, binding, "substr", ("SUBSTR(", ", ", " - 1)")),
             Function::Contains => translate_binary_function(state, left, right, binding, "contains", ("CONTAINS(", ", ", ")")),
             Function::StrStarts => translate_binary_function(state, left, right, binding, "str_starts", ("STRSTARTS(", ", ", ")")),
             Function::StrEnds => translate_binary_function(state, left, right, binding, "str_ends", ("STRENDS(", ", ", ")")),
@@ -314,13 +361,12 @@ fn translate_expression(state: &mut State, expression: &Expression, binding: &dy
         Expression::UnaryPlus(inner) => translate_unary_function(state, inner, binding, "unary_plus", ("0 + ", "")),
         Expression::UnaryMinus(inner) => translate_unary_function(state, inner, binding, "unary_minus", ("0 - ", "")),
         Expression::Not(inner) => translate_not(state, inner, binding),
+        Expression::Exists(inner) => translate_exists(state, inner, binding),
+        Expression::If(cond, true_val, false_val) => translate_if(state, cond, true_val, false_val, binding),
         Expression::FunctionCall(func, params) => translate_function(state, func, params, binding),
         _ => Err(ExpressionNotImplemented(expression.clone()))
     }
 }
-
-const TRUE: &'static str = "\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>";
-const FALSE: &'static str = "\"false\"^^<http://www.w3.org/2001/XMLSchema#boolean>";
 
 fn translate_effective_boolean_value(state: &mut State, inner: &SolutionExpression) -> Result<SolutionExpression, TranslateError>{
     let inner_var = inner.result();
@@ -354,7 +400,7 @@ fn translate_smart_effective_boolean_value(state: &mut State, inner: SolutionExp
         Expression::Equal(_, _) | Expression::SameTerm(_, _) |
         Expression::Greater(_, _) | Expression::GreaterOrEqual(_, _) |
         Expression::Less(_, _) | Expression::LessOrEqual(_, _) |
-        Expression::In(_, _) |
+        Expression::In(_, _) | Expression::Exists(_) |
         Expression::Not(_) | Expression::Or(_, _) | Expression::And(_, _) |
         Expression::FunctionCall(Function::IsBlank, _) |
         Expression::FunctionCall(Function::IsNumeric, _) |
@@ -363,6 +409,199 @@ fn translate_smart_effective_boolean_value(state: &mut State, inner: SolutionExp
         _ => translate_effective_boolean_value(state, &inner)
     }
 }
+
+fn translate_path_property(state: &mut State, start: Option<String>, property: &NamedNode, end: Option<String>) -> Result<SolutionPath, TranslateError>{
+    let solution = SolutionPath::new(state, "path_property", start.clone(), end.clone());
+    state.add_line(format!(
+        "{} :- {}({}, {}, {})",
+        format_solution_path(&solution, start.clone(), end.clone()),
+        GRAPH_NAME,
+        start.unwrap_or(solution.start()),
+        property.to_string(),
+        end.unwrap_or(solution.end()),
+    ));
+    Ok(solution)
+}
+
+fn translate_negated_property_set(state: &mut State, start: Option<String>, properties: &Vec<NamedNode>, end: Option<String>) -> Result<SolutionPath, TranslateError>{
+    let solution = SolutionPath::new(state, "negated_property_set", start.clone(), end.clone());
+    let property_var = state.var("PROPERTY_VAR");
+    let mut property_conditions = String::new();
+    for p in properties.iter().map(|p| p.to_string()) {
+        property_conditions.push_str(&format!(", ?{property_var} != {p}"));
+    }
+
+    state.add_line(format!(
+        "{} :- {}({}, ?{}, {}){}",
+        format_solution_path(&solution, start.clone(), end.clone()),
+        GRAPH_NAME,
+        start.unwrap_or(solution.start()),
+        property_var,
+        end.unwrap_or(solution.end()),
+        property_conditions,
+    ));
+    Ok(solution)
+}
+
+fn translate_reverse_path(state: &mut State, start: Option<String>, inner: &PropertyPathExpression, end: Option<String>) -> Result<SolutionPath, TranslateError>{
+    let inner_solution = translate_path(state, end.clone(), inner, start.clone())?;
+    let solution = SolutionPath::new(state, "reverse", start, end);
+    state.add_line(format!(
+        "{} :- {}",
+        format_solution(&solution),
+        format_solution_path(&inner_solution, Some(solution.end()), Some(solution.start())),
+    ));
+    Ok(solution)
+}
+
+fn translate_path_sequence(state: &mut State, start: Option<String>, first: &PropertyPathExpression, second: &PropertyPathExpression, end: Option<String>) -> Result<SolutionPath, TranslateError>{
+    let first_solution = translate_path(state, start.clone(), first, None)?;
+    let second_solution = translate_path(state, None, second, end.clone())?;
+    let solution = SolutionPath::new(state, "sequence", start, end);
+    state.add_line(format!(
+        "{} :- {}, {}",
+        format_solution(&solution),
+        format_solution_path(&first_solution, Some(solution.start()), None),
+        format_solution_path(&second_solution, Some(first_solution.end()), Some(solution.end())),
+    ));
+    Ok(solution)
+}
+
+fn translate_path_alternative(state: &mut State, start: Option<String>, first: &PropertyPathExpression, second: &PropertyPathExpression, end: Option<String>) -> Result<SolutionPath, TranslateError>{
+    let first_solution = translate_path(state, start.clone(), first, end.clone())?;
+    let second_solution = translate_path(state, start.clone(), second, end.clone())?;
+    let solution = SolutionPath::new(state, "alternative", start, end);
+    state.add_line(format!(
+        "{} :- {}",
+        format_solution(&solution),
+        format_solution_path(&first_solution, Some(solution.start()), Some(solution.end()))
+    ));
+    state.add_line(format!(
+        "{} :- {}",
+        format_solution(&solution),
+        format_solution_path(&second_solution, Some(solution.start()), Some(solution.end()))
+    ));
+    Ok(solution)
+}
+
+fn iterate_path(state: &mut State, start: Option<String>, path: &PropertyPathExpression) -> Result<SolutionPath, TranslateError>{
+    let inner_solution = translate_path(state, None, path, None)?;
+    let solution = SolutionPath::new(state, "path_recursive", start.clone(), None);
+    state.add_line(format!(
+        "{} :- {}",
+        format_solution_path(&solution, start.clone(), None),
+        format_solution_path(&inner_solution, start.clone().or(Some(solution.start())).clone(), Some(solution.end())),
+    ));
+    state.add_line(format!(
+        "{} :- {}, {}",
+        format_solution_path(&solution, start.clone(), None),
+        format_solution_path(&solution, start.clone(), Some(inner_solution.start())),
+        format_solution_path(&inner_solution, None, Some(solution.end())),
+    ));
+    Ok(solution)
+}
+
+fn is_term(t: &Option<String>) -> bool {
+    match t {
+        Some(s) => !s.starts_with('?'),
+        None => false,
+    }
+}
+
+fn zero_path_extend(state: &mut State, solution: &SolutionPath, start: Option<String>, end: Option<String>) {
+    // two terms, different
+    if is_term(&start) && is_term(&end) && &start != &end { return }
+
+    let start_term = if is_term(&start) { start } else { None };
+    let end_term = if is_term(&end) { end } else { None };
+    let term = start_term.or(end_term);
+
+    if let Some(t) = term {
+        // one term or two terms that are the same
+        state.add_line(format_solution_path(&solution, Some(t.clone()), Some(t)));
+    }
+    else {
+        // no terms
+        state.add_line(format!(
+            "{} :- {}(?s, ?p, ?o)",
+            format_solution_path(&solution, Some("?s".to_string()), Some("?s".to_string())),
+            GRAPH_NAME
+        ));
+        state.add_line(format!(
+            "{} :- {}(?s, ?p, ?o)",
+            format_solution_path(&solution, Some("?o".to_string()), Some("?o".to_string())),
+            GRAPH_NAME
+        ));
+    }
+}
+
+fn translate_one_or_more_path(state: &mut State, start: Option<String>, path: &PropertyPathExpression, end: Option<String>) -> Result<SolutionPath, TranslateError>{
+    let reverse_iterate = is_term(&end) && !is_term(&start);
+    let path_to_iterate = if reverse_iterate {&PropertyPathExpression::Reverse(Box::new(path.clone()))} else {path};
+    let inner_start = if reverse_iterate {end.clone()} else {start.clone()};
+
+    let inner_solution = iterate_path(state, inner_start, path_to_iterate)?;
+    let solution = SolutionPath::new(state, "one_or_more", start.clone(), end.clone());
+
+    let mut inner_start = Some(solution.start());
+    let mut inner_end = Some(solution.end());
+    let mut outer_start = Some(solution.start());
+    let mut outer_end = Some(solution.end());
+    if is_term(&start) { outer_start = start.clone(); inner_start = start };
+    if is_term(&end) { outer_end = end.clone(); inner_end = end };
+    if reverse_iterate { (inner_end, inner_start) = (inner_start, inner_end) };
+
+    state.add_line(format!(
+        "{} :- {}",
+        format_solution_path(&solution, outer_start, outer_end),
+        format_solution_path(&inner_solution, inner_start, inner_end),
+    ));
+
+    Ok(solution)
+}
+
+fn translate_zero_or_more_path(state: &mut State, start: Option<String>, path: &PropertyPathExpression, end: Option<String>) -> Result<SolutionPath, TranslateError>{
+    let inner_solution = translate_one_or_more_path(state, start.clone(), path, end.clone())?;
+    let solution = SolutionPath::new(state, "zero_or_more", start.clone(), end.clone());
+    state.add_line(format!(
+        "{} :- {}", format_solution(&solution), format_solution_path(&inner_solution, Some(solution.start()), Some(solution.end()))
+    ));
+    zero_path_extend(state, &solution, start, end);
+    Ok(solution)
+}
+
+fn translate_zero_or_one_path(state: &mut State, start: Option<String>, path: &PropertyPathExpression, end: Option<String>) -> Result<SolutionPath, TranslateError>{
+    let inner_solution = translate_path(state, start.clone(), path, end.clone())?;
+    let solution = SolutionPath::new(state, "zero_or_one", start.clone(), end.clone());
+    state.add_line(format!(
+        "{} :- {}", format_solution(&solution), format_solution_path(&inner_solution, Some(solution.start()), Some(solution.end()))
+    ));
+    zero_path_extend(state, &solution, start, end);
+    Ok(solution)
+}
+
+fn translate_path(state: &mut State, start: Option<String>, path: &PropertyPathExpression, end: Option<String>) -> Result<SolutionPath, TranslateError>{
+    match path {
+        PropertyPathExpression::NamedNode(p) => translate_path_property(state, start, p, end),
+        PropertyPathExpression::Reverse(inner) => translate_reverse_path(state, start, inner, end),
+        PropertyPathExpression::Sequence(first, second) => translate_path_sequence(state, start, first, second, end),
+        PropertyPathExpression::Alternative(a, b) => translate_path_alternative(state, start, a, b, end),
+        PropertyPathExpression::OneOrMore(p) => translate_one_or_more_path(state, start, p, end),
+        PropertyPathExpression::ZeroOrMore(p) => translate_zero_or_more_path(state, start, p, end),
+        PropertyPathExpression::ZeroOrOne(p) => translate_zero_or_one_path(state, start, p, end),
+        PropertyPathExpression::NegatedPropertySet(ps) => translate_negated_property_set(state, start, ps, end),
+    }
+}
+
+fn translate_node(node: &TermPattern) -> Result<String, TranslateError> {
+    match node {
+        TermPattern::NamedNode(n) => Ok(n.to_string()),
+        TermPattern::BlankNode(n) => Ok(format!("?BNODE_VARIABLE_{}", n.as_str())),
+        TermPattern::Variable(n) => Ok(n.to_string()),
+        _ => Err(TermNotImplemented(node.clone()))
+    }
+}
+
 
 fn translate_triple(triple: &TriplePattern, variables: &mut Vec<String>) -> Result<String, TranslateError> {
     let mut graph_match = GRAPH_NAME.to_string();
@@ -481,7 +720,10 @@ fn translate_union(state: &mut State, left: &Box<GraphPattern>, right: &Box<Grap
 
 fn translate_filter(state: &mut State, expression: &Expression, inner: &Box<GraphPattern>) -> Result<SolutionMapping, TranslateError> {
     let inner_solution = translate_pattern(state, inner)?;
-    let expr_solution = translate_expression(state, expression, &inner_solution)?;
+    let expr_solution = match expression {
+        Expression::Exists(pattern) => translate_positive_exists(state, pattern, &inner_solution),
+        _ => translate_expression(state, expression, &inner_solution)
+    }?;
     let bool_solution = translate_smart_effective_boolean_value(state, expr_solution, expression)?;
 
     let solution = SolutionMapping{predicate: state.predicate("filter"), variables: inner_solution.vars().clone()};
@@ -497,11 +739,20 @@ fn translate_filter(state: &mut State, expression: &Expression, inner: &Box<Grap
 fn translate_pattern(state: &mut State, pattern: &GraphPattern) -> Result<SolutionMapping, TranslateError>{
     match pattern {
         GraphPattern::Bgp{patterns} => translate_bgp(state, patterns),
-        GraphPattern::Project{inner, variables} => translate_project(state, inner, variables),
+        GraphPattern::Path {subject, path, object} =>
+            Ok(SolutionMapping::from(
+                translate_path(
+                    state,
+                    Some(translate_node(subject)?),
+                    path,
+                    Some(translate_node(object)?)
+                )?
+            )),
         GraphPattern::Join {left, right} => translate_join(state, left, right),
-        GraphPattern::Distinct {inner} => translate_distinct(state, inner),
-        GraphPattern::Union {left, right} => translate_union(state, left, right),
         GraphPattern::Filter {expr, inner} => translate_filter(state, expr, inner),
+        GraphPattern::Union {left, right} => translate_union(state, left, right),
+        GraphPattern::Project{inner, variables} => translate_project(state, inner, variables),
+        GraphPattern::Distinct {inner} => translate_distinct(state, inner),
         _ => Err(PatternNotImplemented(pattern.clone()))
     }
 }
