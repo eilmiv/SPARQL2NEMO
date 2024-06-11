@@ -3,9 +3,9 @@ use spargebra::algebra::{Expression, Function, GraphPattern, PropertyPathExpress
 use spargebra::term::{Literal, NamedNode, NamedNodePattern, TermPattern, TriplePattern, Variable};
 use spargebra::Query;
 use crate::error::TranslateError;
-use crate::error::TranslateError::{ExpressionNotImplemented, FunctionNotImplemented, InvalidNumberOfArguments, MultiPatternNotImplemented, PatternNotImplemented, QueryNotImplemented, TermNotImplemented};
-use crate::solutions;
-use crate::solutions::{expression_variables, expression_vars_n, format_solution, format_solution_mapped, format_solution_path, Solution, SolutionExpression, SolutionMapping, SolutionMulti, SolutionMultiMapping, SolutionPath};
+use crate::error::TranslateError::{ExpressionNotImplemented, FunctionNotImplemented, InvalidNumberOfArguments, MultiPatternNotImplemented, PatternNotImplemented, TermNotImplemented};
+use crate::basic_solutions;
+use crate::basic_solutions::{expression_variables, expression_vars_n, format_solution, format_solution_mapped, format_solution_path, Solution, SolutionExpression, SolutionMapping, SolutionMulti, SolutionMultiMapping, SolutionPath};
 use crate::state::State;
 
 const GRAPH_NAME: &str = "input_graph";
@@ -213,7 +213,7 @@ fn translate_by_cases(state: &mut State, left: &Expression, right: &Expression, 
 fn translate_nary_function(state: &mut State, params: Vec<&Expression>, binding: &dyn Solution, func: &str) -> Result<SolutionExpression, TranslateError>{
     let solution_results: Result<Vec<_>, _> = params.iter().map(|p| translate_expression(state, p, binding)).collect();
     let solutions = solution_results?;
-    let solution = SolutionExpression::new(state, func.to_lowercase().as_str(), solutions::expression_vars_n(&solutions));
+    let solution = SolutionExpression::new(state, func.to_lowercase().as_str(), basic_solutions::expression_vars_n(&solutions));
 
     let mut body = format_solution(binding);
     for s in &solutions {
@@ -655,7 +655,7 @@ fn translate_bgp(state: &mut State, patterns: &Vec<TriplePattern>) -> Result<Sol
     variables.sort();
     variables.dedup();
     let solution = SolutionMapping{predicate: state.predicate("bgp"), variables};
-    let solution_str = solutions::format_solution(&solution);
+    let solution_str = basic_solutions::format_solution(&solution);
     state.add_line(format!("{solution_str} :- {body}"));
     Ok(solution)
 }
@@ -670,7 +670,7 @@ fn translate_project(state: &mut State, pattern: &Box<GraphPattern>, variables: 
 fn translate_join(state: &mut State, left: &Box<GraphPattern>, right: &Box<GraphPattern>) -> Result<SolutionMapping, TranslateError> {
     let left_solution = translate_pattern(state, left)?;
     let right_solution = translate_pattern(state, right)?;
-    let variables = solutions::combine_variables(&left_solution, &right_solution);
+    let variables = basic_solutions::combine_variables(&left_solution, &right_solution);
     let solution = SolutionMapping{predicate: state.predicate("join"), variables};
     state.add_rule(&solution, vec![&left_solution, &right_solution]);
     Ok(solution)
@@ -694,7 +694,7 @@ fn translate_distinct_multi(state: &mut State, pattern: &GraphPattern) -> Result
 fn translate_union(state: &mut State, left: &Box<GraphPattern>, right: &Box<GraphPattern>) -> Result<SolutionMapping, TranslateError> {
     let left_solution = translate_pattern(state, left)?;
     let right_solution = translate_pattern(state, right)?;
-    let variables = solutions::combine_variables(&left_solution, &right_solution);
+    let variables = basic_solutions::combine_variables(&left_solution, &right_solution);
     let solution = SolutionMapping{predicate: state.predicate("union"), variables};
     let mut left_map = HashMap::new();
     let mut right_map = HashMap::new();
@@ -769,11 +769,60 @@ fn translate_describe(state: &mut State, pattern: &GraphPattern) -> Result<Solut
     let body = format_solution(&inner_solution);
     let to_describe = state.predicate("to_describe");
     let solution = SolutionMapping{predicate: state.predicate("description_graph"), variables: vec!["s".to_string(), "p".to_string(), "o".to_string()]};
-    let solution_body = format_solution(&solution);
+    let solution_head = format_solution(&solution);
     for var in inner_solution.vars() {
         state.add_line(format!("{to_describe}(?{var}) :- {body}"));
     }
-    state.add_line(format!("{solution_body} :- {GRAPH_NAME}(?s, ?p, ?o), {to_describe}(?s)"));
+    state.add_line(format!("{solution_head} :- {GRAPH_NAME}(?s, ?p, ?o), {to_describe}(?s)"));
+    Ok(solution)
+}
+
+fn translate_ask(state: &mut State, pattern: &GraphPattern) -> Result<SolutionMapping, TranslateError>{
+    let inner_solution = translate_pattern(state, pattern)?;
+    let body = format_solution(&inner_solution);
+    let solution = SolutionMapping{predicate: state.predicate("ask_result"), variables: vec!["r".to_string()]};
+    let true_head = format_solution_mapped(&solution, HashMap::from([("r".to_string(), TRUE.to_string())]));
+    let false_head = format_solution_mapped(&solution, HashMap::from([("r".to_string(), FALSE.to_string())]));
+
+    let dummy = state.predicate("dummy");
+    state.add_line(format!("{dummy}(exists)"));
+    state.add_line(format!("{true_head} :- {body}"));
+    state.add_line(format!("{false_head} :- {dummy}(exists), ~{body}"));
+    Ok(solution)
+}
+
+fn translate_construct_term(term: &TermPattern) -> String {
+    match term {
+        TermPattern::NamedNode(n) => n.to_string(),
+        TermPattern::Literal(l) => l.to_string(),
+        TermPattern::Variable(v) => v.to_string(),
+        TermPattern::BlankNode(b) => format!("!BNODE_VARIABLE_{}", b.as_str()),
+    }
+}
+
+fn translate_construct(state: &mut State, pattern: &GraphPattern, template: &Vec<TriplePattern>) -> Result<SolutionMapping, TranslateError>{
+    let inner_solution = translate_pattern(state, pattern)?;
+    let body = format_solution(&inner_solution);
+    let proto_graph = SolutionMapping{predicate: state.predicate("proto_graph"), variables: vec!["s".to_string(), "p".to_string(), "o".to_string()]};
+    let solution = SolutionMapping{predicate: state.predicate("constructed_graph"), variables: vec!["s".to_string(), "p".to_string(), "o".to_string()]};
+
+    let head = template.iter()
+        .map(|triple|
+            format_solution_mapped(
+                &proto_graph, HashMap::from(
+                    [
+                        ("s".to_string(), translate_construct_term(&triple.subject)),
+                        ("p".to_string(), triple.predicate.to_string()),
+                        ("o".to_string(), translate_construct_term(&triple.object))
+                    ],
+                )
+            )
+        )
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    state.add_line(format!("{head} :- {body}"));
+    state.add_line(format!("{} :- {}, AND(OR(isNull(?s), isIri(?s)), isIri(?p)) = {}", format_solution(&solution), format_solution(&proto_graph), TRUE));
     Ok(solution)
 }
 
@@ -782,7 +831,8 @@ fn translate_query(state: &mut State, query: &Query) -> Result<Box<dyn Solution>
         Query::Select {pattern: GraphPattern::Distinct{inner}, dataset: _, base_iri: _} => Ok(Box::new(translate_pattern(state, inner)?)),
         Query::Select {pattern, dataset: _, base_iri: _} => Ok(Box::new(translate_pattern_multi(state, pattern)?)),
         Query::Describe {pattern, dataset: _, base_iri: _} => Ok(Box::new(translate_describe(state, pattern)?)),
-        _ => Err(QueryNotImplemented(query.clone()))
+        Query::Ask {pattern, dataset: _, base_iri: _} => Ok(Box::new(translate_ask(state, pattern)?)),
+        Query::Construct {pattern, dataset: _, base_iri: _, template} => Ok(Box::new(translate_construct(state, pattern, template)?)),
     }
 }
 

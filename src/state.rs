@@ -1,5 +1,5 @@
-use crate::solutions;
-use crate::solutions::Solution;
+use crate::basic_solutions;
+use crate::basic_solutions::Solution;
 
 #[derive(Debug)]
 pub struct State {
@@ -50,8 +50,8 @@ impl State {
         self.text.push_str(" .\n");
     }
     pub fn add_rule(&mut self, head: &dyn Solution, body: Vec<&dyn Solution>){
-        let head_str = solutions::format_solution(head);
-        let body_strings: Vec<String> = body.iter().map(|s| solutions::format_solution(*s)).collect();
+        let head_str = basic_solutions::format_solution(head);
+        let body_strings: Vec<String> = body.iter().map(|s| basic_solutions::format_solution(*s)).collect();
         let body_str = body_strings.join(", ");
         self.add_line(format!("{head_str} :- {body_str}"));
     }

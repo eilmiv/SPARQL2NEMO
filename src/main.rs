@@ -1,10 +1,13 @@
-mod solutions;
+mod basic_solutions;
 mod error;
 mod state;
 mod translation;
+mod solution;
 
+use std::rc::Rc;
 use spargebra::algebra::GraphPattern;
 use spargebra::Query;
+use crate::solution::{Column};
 
 fn _test_parsing() {
     let query_str = "
@@ -43,12 +46,32 @@ fn _my_to_string(s: &String) -> String{
     s.to_string()
 }
 
+macro_rules! my_vec {
+    //($($elem:expr),*) => {vec![$($elem, $elem),*]};
+    //($($elem:expr)=>*) => {vec![$($elem),*]};
+    //%($($elem:expr)*) => {vec![$($elem),*]};
+    //%($last:expr => $($elem:expr),*) => {vec![$($elem),*, $last]};
+    ($head:literal :- $($body:literal),+ .) => {vec![$head, $($body),+]};
+    ($head:literal .) => {vec![$head]};
+    (abc) => {vec![55]};
+    ($($first:literal),+ . $($second:literal and $($third:literal),+);+) => {vec![$($first),+, $($second, $($third),+),+]};
+}
+
 fn _test_rust(){
     println!("testing rust...");
     let s = String::from("abc");
     let tmp = _my_to_string(&s);
-    let b = tmp.as_str();
-    println!("{}", b);
+    let _b = tmp.as_str();
+    let _i = 3;
+    println!("{:?}", my_vec!(
+        1, 2, 3 .
+        4 and 0; 5 and -1
+    ));
+    let v1= Rc::new(Column::new("abc"));
+    let v2= v1.clone();
+    println!("equal: {}", Rc::ptr_eq(&v1, &v2));
+    let v3: Rc<Column> = v2.into();
+    println!("{:?}", v3);
 }
 
 
@@ -56,10 +79,15 @@ fn _test_translation(){
     let query_str = "
         prefix ex: <https://example.com/>
 
-        SELECT DISTINCT *
-        WHERE {
-            ?subject ^(ex:p1) ?object .
+        CONSTRUCT {
+            ?subject ex:p [
+                ex:p ?object
+            ]
         }
+        WHERE {
+            ?subject ex:pp ?object
+        }
+
     ";
 
     let _query_str = "
@@ -82,6 +110,7 @@ WHERE {
 }
 
     ";
+
     println!("translating query:");
     println!("{}", query_str);
     let result = translation::translate(query_str);
