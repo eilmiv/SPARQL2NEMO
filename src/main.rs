@@ -79,35 +79,11 @@ fn _test_translation(){
     let query_str = "
         prefix ex: <https://example.com/>
 
-        CONSTRUCT {
-            ?subject ex:p [
-                ex:p ?object
-            ]
-        }
+        SELECT ?s (SUM(?o) as ?count)
         WHERE {
-            ?subject ex:pp ?object
+            ?s ?p ?o .
         }
-
-    ";
-
-    let _query_str = "
-    PREFIX book: <http://example.org/book/>
-PREFIX author: <http://example.org/author/>
-
-SELECT DISTINCT ?title
-WHERE {
-  ?book book:hasTitle ?title .
-  ?book book:writtenBy ?author .
-
-  # Subquery to find authors who have written a Science Fiction book
-  {
-    SELECT ?author
-    WHERE {
-      ?sciFiBook book:writtenBy ?author .
-      ?sciFiBook book:hasGenre \"Science Fiction\" .
-    }
-  }
-}
+        GROUP BY ?s
 
     ";
 

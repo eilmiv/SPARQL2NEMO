@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use spargebra::algebra::{Expression, Function, GraphPattern, PropertyPathExpression};
-use spargebra::term::{Literal, NamedNode, NamedNodePattern, TermPattern, TriplePattern, Variable};
+use spargebra::term::{GroundTerm, Literal, NamedNode, NamedNodePattern, TermPattern, TriplePattern, Variable};
 use spargebra::Query;
 use crate::error::TranslateError;
 use crate::error::TranslateError::{ExpressionNotImplemented, FunctionNotImplemented, InvalidNumberOfArguments, MultiPatternNotImplemented, PatternNotImplemented, TermNotImplemented};
@@ -736,6 +736,115 @@ fn translate_filter(state: &mut State, expression: &Expression, inner: &Box<Grap
     Ok(solution)
 }
 
+fn apply_filter(state: &mut State, expression: &Expression, inner_solution: &dyn Solution) -> Result<SolutionMapping, TranslateError> {
+    let expr_solution = match expression {
+        Expression::Exists(pattern) => translate_positive_exists(state, pattern, inner_solution),
+        _ => translate_expression(state, expression, inner_solution)
+    }?;
+    let bool_solution = translate_smart_effective_boolean_value(state, expr_solution, expression)?;
+
+    let solution = SolutionMapping{predicate: state.predicate("filtered"), variables: inner_solution.vars().clone()};
+    let head = format_solution(&solution);
+    let body = format_solution(inner_solution);
+    let mut map = HashMap::new();
+    map.insert(bool_solution.result(), TRUE.to_string());
+    let expr = format_solution_mapped(&bool_solution, map);
+    state.add_line(format!("{head} :- {body}, {expr}"));
+    Ok(solution)
+}
+
+fn translate_left_join(state: &mut State, left: &Box<GraphPattern>, right: &Box<GraphPattern>, expression: &Option<Expression>) -> Result<SolutionMapping, TranslateError> {
+    let left_solution = translate_pattern(state, left)?;
+    let right_solution = translate_pattern(state, right)?;
+    let variables = basic_solutions::combine_variables(&left_solution, &right_solution);
+    let mut inner_solution = SolutionMapping{predicate: state.predicate("raw_join"), variables};
+    state.add_rule(&inner_solution, vec![&left_solution, &right_solution]);
+
+    inner_solution = match expression {
+        Some(expr) => apply_filter(state, expr, &inner_solution)?,
+        None => inner_solution
+    };
+
+    let solution = SolutionMapping{predicate: state.predicate("left_join"), variables: inner_solution.variables.clone()};
+    let optional_vars: Vec<String> = inner_solution.vars().iter().cloned().filter(|v| !left_solution.vars().contains(v)).collect();
+    let mut map = HashMap::new();
+    for v in optional_vars { map.insert(v.clone(), format!("!{v}")); };
+
+    state.add_rule(&solution, vec![&inner_solution]);
+    state.add_line(format!("{} :- {}", format_solution_mapped(&solution, map), format_solution(&left_solution)));
+
+    Ok(solution)
+}
+
+fn translate_extend(state: &mut State, inner: &Box<GraphPattern>, variable: &Variable, expression: &Expression) -> Result<SolutionMapping, TranslateError> {
+    let inner_solution = translate_pattern(state, inner)?;
+    let expr_solution = translate_expression(state, expression, &inner_solution)?;
+    let mut variables = inner_solution.vars().clone();
+    let var_string = variable.as_str().to_string();
+    variables.push(var_string.clone());
+
+    let solution = SolutionMapping{predicate: state.predicate("extend"), variables};
+    let head = format_solution(&solution);
+    let body = format_solution(&inner_solution);
+    let expr = format_solution_mapped(&expr_solution, HashMap::from([(expr_solution.result(), format!("?{var_string}"))]));
+    let error_head = format_solution_mapped(&solution, HashMap::from([(var_string, format!("!{}", state.var("expression_error")))]));
+    state.add_line(format!("{head} :- {body}, {expr}"));
+    state.add_line(format!("{error_head} :- {body}"));
+    Ok(solution)
+}
+
+fn translate_minus(state: &mut State, left: &GraphPattern, right: &GraphPattern) -> Result<SolutionMapping, TranslateError> {
+    let inner_solution = translate_pattern(state, left)?;
+    let exclude_solution = translate_pattern(state, right)?;
+    let solution = SolutionMapping { predicate: state.predicate("minus"), variables: inner_solution.vars().clone() };
+    let head = format_solution(&solution);
+    let body = format_solution(&inner_solution);
+    let exclude_body = format_solution(&exclude_solution);
+    state.add_line(format!("{head} :- {body}, ~{exclude_body}"));
+    Ok(solution)
+}
+
+fn translate_ground_term(state: &mut State, term: &Option<GroundTerm>) -> String {
+    match term {
+        None => format!("!{}", state.var("UNDEF")),
+        Some(GroundTerm::Literal(l)) => l.to_string(),
+        Some(GroundTerm::NamedNode(n)) => n.to_string(),
+    }
+}
+
+fn translate_values(state: &mut State, variables: &Vec<Variable>, bindings: &Vec<Vec<Option<GroundTerm>>>) -> Result<SolutionMapping, TranslateError>{
+    let variable_strings: Vec<String> = variables.iter().map(|v| v.as_str().to_string()).collect();
+    let solution = SolutionMapping{predicate: state.predicate("values"), variables: variable_strings.clone()};
+    let dummy = state.predicate("dummy");
+
+    state.add_line(format!("{dummy}(exists)"));
+    for binding in bindings {
+        let mut map = HashMap::new();
+        for (var, val) in variable_strings.iter().zip(binding){
+            map.insert(var.clone(), translate_ground_term(state, val));
+        }
+        state.add_line(format!("{} :- {}(exists)", format_solution_mapped(&solution, map), dummy));
+    }
+
+    Ok(solution)
+}
+
+fn translate_aggregation(state, inner, disticnt, variable, expression, aggregation: String){
+    // translate inner, considering distinct
+    // create solution from inner + variable
+    // translate expression
+    // solution(variables, #aggregation(?expression_result)) :- inner, expression
+}
+
+fn translate_count_all(state, inner, disticnt)
+
+fn translate_group_by(state, inner, variables, aggregates){
+    // translate inner
+    // create solution from variables + aggregates[i].0
+    // build body from inner and all aggregated predicates -> translate_aggregation
+    // prematch kind of aggregation function because maybe special count handling
+}
+
 fn translate_pattern(state: &mut State, pattern: &GraphPattern) -> Result<SolutionMapping, TranslateError>{
     match pattern {
         GraphPattern::Bgp{patterns} => translate_bgp(state, patterns),
@@ -749,10 +858,19 @@ fn translate_pattern(state: &mut State, pattern: &GraphPattern) -> Result<Soluti
                 )?
             )),
         GraphPattern::Join {left, right} => translate_join(state, left, right),
+        GraphPattern::LeftJoin {left, right, expression} => translate_left_join(state, left, right, expression),
         GraphPattern::Filter {expr, inner} => translate_filter(state, expr, inner),
         GraphPattern::Union {left, right} => translate_union(state, left, right),
+        GraphPattern::Extend {inner, variable, expression} => translate_extend(state, inner, variable, expression),
+        GraphPattern::Minus {left, right} => translate_minus(state, left, right),
+        GraphPattern::Values {variables, bindings} => translate_values(state, variables, bindings),
+        //GraphPattern::OrderBy {inner, expression} => Err(PatternNotImplemented(pattern.clone())),
         GraphPattern::Project{inner, variables} => translate_project(state, inner, variables),
         GraphPattern::Distinct {inner} => translate_distinct(state, inner),
+        GraphPattern::Reduced {inner} => translate_distinct(state, inner),
+        //GraphPattern::Slice {inner, start, length} => Err(PatternNotImplemented(pattern.clone())),
+        //GraphPattern::Group {inner, variables, aggregates} => Err(PatternNotImplemented(pattern.clone())),
+        //GraphPattern::Service {name, inner, silent} => Err(PatternNotImplemented(pattern.clone())),
         _ => Err(PatternNotImplemented(pattern.clone()))
     }
 }
