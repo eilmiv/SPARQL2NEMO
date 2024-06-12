@@ -1,9 +1,9 @@
 use std::collections::HashMap;
-use spargebra::algebra::{Expression, Function, GraphPattern, PropertyPathExpression};
+use spargebra::algebra::{AggregateExpression, Expression, Function, GraphPattern, PropertyPathExpression};
 use spargebra::term::{GroundTerm, Literal, NamedNode, NamedNodePattern, TermPattern, TriplePattern, Variable};
 use spargebra::Query;
 use crate::error::TranslateError;
-use crate::error::TranslateError::{ExpressionNotImplemented, FunctionNotImplemented, InvalidNumberOfArguments, MultiPatternNotImplemented, PatternNotImplemented, TermNotImplemented};
+use crate::error::TranslateError::{AggregationNotImplemented, ExpressionNotImplemented, FunctionNotImplemented, InvalidNumberOfArguments, MultiPatternNotImplemented, PatternNotImplemented, TermNotImplemented};
 use crate::basic_solutions;
 use crate::basic_solutions::{expression_variables, expression_vars_n, format_solution, format_solution_mapped, format_solution_path, Solution, SolutionExpression, SolutionMapping, SolutionMulti, SolutionMultiMapping, SolutionPath};
 use crate::state::State;
@@ -12,8 +12,17 @@ const GRAPH_NAME: &str = "input_graph";
 const TRUE: &'static str = "\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>";
 const FALSE: &'static str = "\"false\"^^<http://www.w3.org/2001/XMLSchema#boolean>";
 
+fn to_v(v: String) -> String {
+    if let Some(first_char) = v.chars().next() {
+        if first_char.is_ascii_alphabetic() {
+            return v;
+        }
+    }
+    format!("var_{}", v)
+}
+
 fn translate_expression_variable(state: &mut State, var: &Variable, binding: &dyn Solution) -> Result<SolutionExpression, TranslateError>{
-    let var_str = var.as_str().to_string();
+    let var_str = to_v(var.as_str().to_string());
     let solution = SolutionExpression::new(state, "var", vec![var_str.to_string()]);
     let mut map = HashMap::new();
     map.insert(solution.result(), format!("?{var_str}"));
@@ -829,20 +838,84 @@ fn translate_values(state: &mut State, variables: &Vec<Variable>, bindings: &Vec
     Ok(solution)
 }
 
-fn translate_aggregation(state, inner, disticnt, variable, expression, aggregation: String){
-    // translate inner, considering distinct
-    // create solution from inner + variable
-    // translate expression
-    // solution(variables, #aggregation(?expression_result)) :- inner, expression
+fn translate_aggregation(state: &mut State, inner: &dyn Solution, variable: String, expression: &Expression, aggregation: &str, variables: Vec<String>, idempotent: bool) -> Result<SolutionMapping, TranslateError>{
+    let expr_solution = translate_expression(state, expression, inner)?;
+
+    let var_list = if idempotent {
+        format!("?{}", expr_solution.result())
+    }
+    else {
+        vec![expr_solution.result()].iter()
+            .chain(inner.vars().iter().filter(|v| !variables.contains(v)))
+            .map(|v| format!("?{v}")).collect::<Vec<_>>()
+            .join(", ")
+    };
+    let mut variables = variables;
+    variables.push(variable.clone());
+    let solution = SolutionMapping{predicate: state.predicate(format!("{aggregation}_aggregate").as_str()), variables};
+
+    state.add_line(format!(
+        "{} :- {}, {}",
+        format_solution_mapped(&solution, HashMap::from([(variable, format!("#{aggregation}({var_list})"))])),
+        format_solution(inner),
+        format_solution(&expr_solution)
+    ));
+
+    Ok(solution)
 }
 
-fn translate_count_all(state, inner, disticnt)
+fn translate_count_all(state: &mut State, inner: &dyn Solution, variable: String, extra_vars: Vec<String>) -> Result<SolutionMapping, TranslateError>{
+    let var_list = inner.vars().iter()
+        .filter(|v| !extra_vars.contains(v))
+        .map(|v| format!("?{v}")).collect::<Vec<_>>()
+        .join(", ");
+    let mut variables = extra_vars;
+    variables.push(variable.clone());
+    let solution = SolutionMapping{predicate: state.predicate("count_all"), variables};
 
-fn translate_group_by(state, inner, variables, aggregates){
-    // translate inner
-    // create solution from variables + aggregates[i].0
-    // build body from inner and all aggregated predicates -> translate_aggregation
-    // prematch kind of aggregation function because maybe special count handling
+    state.add_line(format!(
+        "{} :- {}",
+        format_solution_mapped(&solution, HashMap::from([(variable, format!("#count({var_list})"))])),
+        format_solution(inner)
+    ));
+
+    Ok(solution)
+}
+
+fn translate_group_by(state: &mut State, inner: &GraphPattern, variables: &Vec<Variable>, aggregates: &Vec<(Variable, AggregateExpression)>) -> Result<SolutionMapping, TranslateError>{
+    let inner_solution = translate_pattern(state, inner)?;
+    let variable_strings: Vec<String> = variables.iter().map(|v| v.as_str().to_string()).collect();
+    let solution_variables: Vec<String> = variable_strings.iter().cloned().chain(
+        aggregates.iter().map(|a| to_v(a.0.as_str().to_string()))
+    ).collect();
+    let solution = SolutionMapping{predicate: state.predicate("collect_aggregations"), variables: solution_variables};
+    let aggregations: Vec<SolutionMapping> = aggregates.iter().map(|a|
+        match a {
+            (v, AggregateExpression::Count {expr: None, distinct: true}) => translate_count_all(
+                state, &inner_solution, to_v(v.as_str().to_string()), variable_strings.clone()
+            ),
+            (v, AggregateExpression::Count {expr: Some(expr), distinct: true}) => translate_aggregation(
+                state, &inner_solution, to_v(v.as_str().to_string()), &expr, "count", variable_strings.clone(), false
+            ),
+            (v, AggregateExpression::Sum {expr, distinct: true}) => translate_aggregation(
+                state, &inner_solution, to_v(v.as_str().to_string()), &expr, "sum", variable_strings.clone(), false
+            ),
+            (v, AggregateExpression::Min {expr, distinct: true}) => translate_aggregation(
+                state, &inner_solution, to_v(v.as_str().to_string()), &expr, "min", variable_strings.clone(), true
+            ),
+            (v, AggregateExpression::Max {expr, distinct: true}) => translate_aggregation(
+                state, &inner_solution, to_v(v.as_str().to_string()), &expr, "max", variable_strings.clone(), true
+            ),
+            _ => Err(AggregationNotImplemented(a.1.clone()))
+        }
+    ).collect::<Result<Vec<_>, _>>()?;
+    let aggregate_body = aggregations.iter().map(|a| format_solution(a)).collect::<Vec<_>>().join(", ");
+    let inner_body = format_solution(&inner_solution);
+    let head = format_solution(&solution);
+
+    state.add_line(format!("{head} :- {inner_body}, {aggregate_body}"));
+
+    Ok(solution)
 }
 
 fn translate_pattern(state: &mut State, pattern: &GraphPattern) -> Result<SolutionMapping, TranslateError>{
@@ -869,7 +942,7 @@ fn translate_pattern(state: &mut State, pattern: &GraphPattern) -> Result<Soluti
         GraphPattern::Distinct {inner} => translate_distinct(state, inner),
         GraphPattern::Reduced {inner} => translate_distinct(state, inner),
         //GraphPattern::Slice {inner, start, length} => Err(PatternNotImplemented(pattern.clone())),
-        //GraphPattern::Group {inner, variables, aggregates} => Err(PatternNotImplemented(pattern.clone())),
+        GraphPattern::Group {inner, variables, aggregates} => translate_group_by(state, inner, variables, aggregates),
         //GraphPattern::Service {name, inner, silent} => Err(PatternNotImplemented(pattern.clone())),
         _ => Err(PatternNotImplemented(pattern.clone()))
     }

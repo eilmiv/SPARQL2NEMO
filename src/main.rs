@@ -77,13 +77,17 @@ fn _test_rust(){
 
 fn _test_translation(){
     let query_str = "
-        prefix ex: <https://example.com/>
+        prefix wdt: <https://example.com/wdt/>
+prefix wd: <https://example.com/wd/>
+prefix wikibase: <https://example.com/wikibase/>
+prefix bd: <https://example.com/bd/>
 
-        SELECT ?s (SUM(?o) as ?count)
-        WHERE {
-            ?s ?p ?o .
-        }
-        GROUP BY ?s
+        SELECT DISTINCT ?item ?itemLabel
+WHERE
+{
+  ?item wdt:P31 wd:Q146. # Must be a cat
+  SERVICE wikibase:label { bd:serviceParam wikibase:language \"[AUTO_LANGUAGE],en\". } # Helps get the label in your language, if not, then en language
+}
 
     ";
 

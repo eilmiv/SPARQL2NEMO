@@ -1,5 +1,5 @@
 use spargebra::{ParseError, Query};
-use spargebra::algebra::{Expression, Function, GraphPattern, PropertyPathExpression};
+use spargebra::algebra::{AggregateExpression, Expression, Function, GraphPattern, PropertyPathExpression};
 use spargebra::term::{TermPattern, TriplePattern};
 
 #[derive(Debug)]
@@ -14,6 +14,7 @@ pub enum TranslateError {
     InvalidNumberOfArguments(Function, Vec<Expression>),
     FunctionNotImplemented(Function),
     PathNotImplemented(PropertyPathExpression),
+    AggregationNotImplemented(AggregateExpression),
     LiteralInSubjectPosition(TriplePattern),
     Todo(&'static str),
 }
