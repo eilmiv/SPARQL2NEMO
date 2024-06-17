@@ -29,7 +29,6 @@ pub struct SolutionMultiMapping {
 pub struct SolutionSequence {
     pub predicate: String,
     pub variables: Vec<String>,
-    pub count_var: String,
     pub index_var: String,
 }
 
@@ -38,21 +37,20 @@ pub trait Solution {
     fn vars(&self) -> &Vec<String>;
 }
 
-pub(crate) trait SolutionMulti {
-    fn count(&self) -> String;
-}
-
 impl Solution for SolutionMapping      { fn pred(&self) -> &String { &self.predicate } fn vars(&self) -> &Vec<String> { &self.variables } }
 impl Solution for SolutionExpression   { fn pred(&self) -> &String { &self.predicate } fn vars(&self) -> &Vec<String> { &self.variables } }
 impl Solution for SolutionPath         { fn pred(&self) -> &String { &self.predicate } fn vars(&self) -> &Vec<String> { &self.variables } }
 impl Solution for SolutionMultiMapping { fn pred(&self) -> &String { &self.predicate } fn vars(&self) -> &Vec<String> { &self.variables } }
 impl Solution for SolutionSequence     { fn pred(&self) -> &String { &self.predicate } fn vars(&self) -> &Vec<String> { &self.variables } }
 
-impl SolutionMulti for SolutionMultiMapping { fn count(&self) -> String { self.count_var.to_string() }}
-impl SolutionMulti for SolutionSequence     { fn count(&self) -> String { self.count_var.to_string() }}
-
 impl From<SolutionPath> for SolutionMapping {
     fn from(value: SolutionPath) -> Self {
+        SolutionMapping{variables: value.variables, predicate: value.predicate}
+    }
+}
+
+impl From<SolutionExpression> for SolutionMapping {
+    fn from(value: SolutionExpression) -> Self {
         SolutionMapping{variables: value.variables, predicate: value.predicate}
     }
 }
@@ -67,6 +65,14 @@ impl SolutionMultiMapping {
             variables,
             count_var,
         }
+    }
+
+    pub fn count(&self) -> String{
+        self.count_var.to_string()
+    }
+
+    pub fn external_vars(&self) -> Vec<String>{
+        self.vars().iter().filter(|v| **v != self.count()).map(|s| s.to_string()).collect()
     }
 }
 
@@ -88,6 +94,26 @@ impl SolutionExpression {
 
     pub fn external_vars(&self) -> Vec<String>{
         self.vars().iter().filter(|v| **v != self.result()).map(|s| s.to_string()).collect()
+    }
+}
+
+impl SolutionSequence {
+    pub fn new(state: &mut State, predicate: &str, vars: &Vec<String>) -> SolutionSequence {
+        let index_var = state.index_var();
+        let variables = vec![index_var.clone()].iter().chain(vars).cloned().collect();
+        SolutionSequence{
+            predicate: state.predicate(predicate),
+            variables,
+            index_var,
+        }
+    }
+
+    pub fn index(&self) -> String {
+        self.index_var.to_string()
+    }
+
+    pub fn external_vars(&self) -> Vec<String>{
+        self.vars().iter().filter(|v| **v != self.index()).cloned().collect()
     }
 }
 

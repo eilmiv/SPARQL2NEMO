@@ -38,6 +38,10 @@ impl State {
         self.var("EXPRESSION_VAR")
     }
 
+    pub fn index_var(&mut self) -> String {
+        self.var("INDEX_VAR")
+    }
+
     fn has_predicate(&self, name: &String) -> bool{
         self.predicate_names.contains(name)
     }

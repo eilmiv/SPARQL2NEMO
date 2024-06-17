@@ -1,11 +1,11 @@
 use std::collections::HashMap;
-use spargebra::algebra::{AggregateExpression, Expression, Function, GraphPattern, PropertyPathExpression};
+use spargebra::algebra::{AggregateExpression, Expression, Function, GraphPattern, OrderExpression, PropertyPathExpression};
 use spargebra::term::{GroundTerm, Literal, NamedNode, NamedNodePattern, TermPattern, TriplePattern, Variable};
 use spargebra::Query;
 use crate::error::TranslateError;
-use crate::error::TranslateError::{AggregationNotImplemented, ExpressionNotImplemented, FunctionNotImplemented, InvalidNumberOfArguments, MultiPatternNotImplemented, PatternNotImplemented, TermNotImplemented};
+use crate::error::TranslateError::{AggregationNotImplemented, ExpressionNotImplemented, FunctionNotImplemented, InvalidNumberOfArguments, MultiPatternNotImplemented, PatternNotImplemented, SequencePatternNotImplemented, TermNotImplemented};
 use crate::basic_solutions;
-use crate::basic_solutions::{expression_variables, expression_vars_n, format_solution, format_solution_mapped, format_solution_path, Solution, SolutionExpression, SolutionMapping, SolutionMulti, SolutionMultiMapping, SolutionPath};
+use crate::basic_solutions::{expression_variables, expression_vars_n, format_solution, format_solution_mapped, format_solution_path, Solution, SolutionExpression, SolutionMapping, SolutionMultiMapping, SolutionPath, SolutionSequence};
 use crate::state::State;
 
 const GRAPH_NAME: &str = "input_graph";
@@ -612,7 +612,7 @@ fn translate_node(node: &TermPattern) -> Result<String, TranslateError> {
 }
 
 
-fn translate_triple(triple: &TriplePattern, variables: &mut Vec<String>) -> Result<String, TranslateError> {
+fn translate_triple(triple: &TriplePattern, variables: &mut Vec<String>, bnode_vars: &mut Vec<String>) -> Result<String, TranslateError> {
     let mut graph_match = GRAPH_NAME.to_string();
     graph_match.push_str("(");
     match &triple.subject {
@@ -620,6 +620,7 @@ fn translate_triple(triple: &TriplePattern, variables: &mut Vec<String>) -> Resu
         TermPattern::BlankNode(node) => {
             let id = node.as_str();
             let var_string = format!("?BNODE_VARIABLE_{id}");
+            bnode_vars.push(var_string.clone());
             graph_match.push_str(var_string.as_str());
         },
         TermPattern::Variable(var) => {
@@ -643,6 +644,7 @@ fn translate_triple(triple: &TriplePattern, variables: &mut Vec<String>) -> Resu
         TermPattern::BlankNode(node) => {
             let id = node.as_str();
             let var_string = format!("?BNODE_VARIABLE_{id}");
+            bnode_vars.push(var_string.clone());
             graph_match.push_str(var_string.as_str());
         },
         TermPattern::Variable(var) => {
@@ -658,7 +660,7 @@ fn translate_bgp(state: &mut State, patterns: &Vec<TriplePattern>) -> Result<Sol
     let mut variables = Vec::new();
     let mut body_parts = Vec::new();
     for triple in patterns.iter() {
-        body_parts.push(translate_triple(triple, &mut variables)?)
+        body_parts.push(translate_triple(triple, &mut variables, &mut vec![])?)
     }
     let body = body_parts.join(", ");
     variables.sort();
@@ -669,10 +671,43 @@ fn translate_bgp(state: &mut State, patterns: &Vec<TriplePattern>) -> Result<Sol
     Ok(solution)
 }
 
+fn translate_bgp_multi(state: &mut State, patterns: &Vec<TriplePattern>) -> Result<SolutionMultiMapping, TranslateError>{
+    let mut variables = Vec::new();
+    let mut bnode_vars = Vec::new();
+    let mut body_parts = Vec::new();
+    for triple in patterns.iter() {
+        body_parts.push(translate_triple(triple, &mut variables, &mut bnode_vars)?)
+    }
+    let body = body_parts.join(", ");
+    variables.sort();
+    variables.dedup();
+    bnode_vars.sort();
+    bnode_vars.dedup();
+    let count_str = if bnode_vars.is_empty() { "1".to_string() } else {
+        format!("#count({})", bnode_vars.join(", "))
+    };
+    let solution = SolutionMultiMapping::new(state, "gbp_multi", variables);
+    let solution_str = format_solution_mapped(&solution, HashMap::from([(solution.count(), count_str)]));
+    state.add_line(format!("{solution_str} :- {body}"));
+    Ok(solution)
+}
+
 fn translate_project(state: &mut State, pattern: &Box<GraphPattern>, variables: &Vec<Variable>) -> Result<SolutionMapping, TranslateError> {
     let inner_pred = translate_pattern(state, pattern)?;
     let solution = SolutionMapping{predicate: state.predicate("projection"), variables: variables.iter().map(|var| var.as_str().to_string()).collect()};
     state.add_rule(&solution, vec![&inner_pred]);
+    Ok(solution)
+}
+
+fn translate_project_seq(state: &mut State, pattern: &Box<GraphPattern>, variables: &Vec<Variable>) -> Result<SolutionSequence, TranslateError> {
+    let inner_pred = translate_pattern_seq(state, pattern)?;
+    let variables = variables.iter().map(|var| var.as_str().to_string()).collect();
+    let solution = SolutionSequence::new(state, "projection_seq", &variables);
+    state.add_line(format!(
+        "{} :- {}",
+        format_solution_mapped(&solution, HashMap::from([(solution.index(), format!("?{}", inner_pred.index()))])),
+        format_solution(&inner_pred)
+    ));
     Ok(solution)
 }
 
@@ -918,6 +953,201 @@ fn translate_group_by(state: &mut State, inner: &GraphPattern, variables: &Vec<V
     Ok(solution)
 }
 
+
+fn to_multi(state: &mut State, inner: &SolutionMapping) -> Result<SolutionMultiMapping, TranslateError> {
+    let solution = SolutionMultiMapping::new(state, "multi_set", inner.vars().clone());
+    state.add_line(format!(
+        "{} :- {}",
+        format_solution_mapped(&solution, HashMap::from([(solution.count(), "1".to_string())])),
+        format_solution(inner)
+    ));
+
+    Ok(solution)
+}
+
+
+fn compute_sequence(state: &mut State, inner: &SolutionMapping, vars: &Vec<String>) -> Result<SolutionSequence, TranslateError> {
+    let sequence_proto = SolutionExpression::new(state, "sequence_proto", inner.vars().clone());
+    let sequence_shifted = SolutionExpression::new(state, "sequence_shifted", vars.clone());
+    let shift_var = state.var("SHIFT_VAR");
+    let sequence_start = SolutionMapping{predicate: state.predicate("sequence_shift"), variables: vec![shift_var.clone()]};
+    let solution = SolutionSequence::new(state, "sequence", vars);
+
+    state.add_line(format!(
+        "{} :- {}",
+        format_solution_mapped(&sequence_proto, HashMap::from([
+            (sequence_proto.result(), format!("!{}", sequence_proto.result()))
+        ])),
+        format_solution(inner)
+    ));
+    state.add_line(format!(
+        "{} :- {}",
+        format_solution_mapped(&sequence_shifted, HashMap::from([
+            (sequence_shifted.result(), format!("INT(STR(?{}))", sequence_proto.result()))
+        ])),
+        format_solution(&sequence_proto)
+    ));
+    state.add_line(format!(
+        "{} :- {}",
+        format_solution_mapped(&sequence_start, HashMap::from([
+            (shift_var.clone(), format!("#min(?{})", sequence_shifted.result()))
+        ])),
+        format_solution(&sequence_shifted)
+    ));
+    state.add_line(format!(
+        "{} :- {}, {}",
+        format_solution_mapped(&solution, HashMap::from([
+            (solution.index(), format!("?{} - ?{}", sequence_shifted.result(), shift_var))
+        ])),
+        format_solution(&sequence_start),
+        format_solution(&sequence_shifted)
+    ));
+
+    Ok(solution)
+}
+
+
+fn to_sequence(state: &mut State, inner: &SolutionMapping) -> Result<SolutionSequence, TranslateError> {
+    compute_sequence(state, inner, inner.vars())
+}
+
+fn to_sequence_multi(state: &mut State, inner: &SolutionMultiMapping) -> Result<SolutionSequence, TranslateError> {
+    let pre_index = SolutionExpression::new(state, "pre_index", inner.vars().clone());
+
+    state.add_line(format!(
+        "{} :- {}",
+        format_solution_mapped(&pre_index, HashMap::from([(pre_index.result(), format!("?{} - 1", inner.count()))])),
+        format_solution(inner)
+    ));
+    state.add_line(format!(
+        "{} :- {}, ?{} > 0",
+        format_solution_mapped(&pre_index, HashMap::from([(pre_index.result(), format!("?{} - 1", pre_index.result()))])),
+        format_solution(&pre_index),
+        pre_index.result()
+    ));
+
+    compute_sequence(state, &SolutionMapping::from(pre_index), &inner.external_vars())
+}
+
+fn translate_sort(state: &mut State, inner: &SolutionSequence, order_expression: &OrderExpression) -> Result<SolutionSequence, TranslateError>{
+    let (suffix, relation, expression ) = match order_expression {
+        OrderExpression::Asc(e) => ("asc", "<=", e),
+        OrderExpression::Desc(e) => ("desc", ">=", e),
+    };
+
+    let inner_expression = translate_expression(state, expression, inner)?;
+    let evaluated = SolutionExpression::new(state, "sort_condition", inner.vars().clone());
+
+    state.add_line(format!(
+        "{} :- {}, {}",
+        format_solution_mapped(&evaluated, HashMap::from([(evaluated.result(), format!("?{}", inner_expression.result()))])),
+        format_solution_mapped(inner, HashMap::from([(inner.index(), format!("?{}", inner.index()))])),
+        format_solution(&inner_expression),
+    ));
+
+    let map: HashMap<String, String> = evaluated.vars().iter().map(
+        |v| (
+            v.clone(),
+            format!(
+                "?{}",
+                state.var(format!("RENAMED_{v}").as_str())
+            )
+        )
+    ).collect();
+    let other_index = map.get(&inner.index()).expect("index should be renamed");
+    let other_result = map.get(&evaluated.result()).expect("result should be renamed");
+
+    let sorted_proto = SolutionSequence::new(state, "sorted_proto", &inner.external_vars());
+    let sorted_ties = SolutionSequence::new(state, "sorted_ties", &inner.external_vars());
+    let solution = SolutionSequence::new(state, format!("stable_sort_{suffix}").as_str(), &inner.external_vars());
+
+    state.add_line(format!(
+        "{} :- {}, {}, {} {} ?{}",
+        format_solution_mapped(
+            &sorted_proto, HashMap::from([(sorted_proto.index(), format!("#count({other_index})"))])
+        ),
+        format_solution(&evaluated),
+        format_solution_mapped(&evaluated, map.clone()),
+        other_result,
+        relation,
+        evaluated.result()
+    ));
+
+    let mut map = map.clone();
+    map.remove(&evaluated.result());
+    state.add_line(format!(
+        "{} :- {}, {}, {} >= ?{}",
+        format_solution_mapped(
+            &sorted_ties, HashMap::from([(sorted_ties.index(), format!("#count({other_index})"))])
+        ),
+        format_solution(&evaluated),
+        format_solution_mapped(&evaluated, map),
+        other_index,
+        inner.index()
+    ));
+
+    state.add_line(format!(
+        "{} :- {}, {}",
+        format_solution_mapped(&solution, HashMap::from([
+            (solution.index(), format!("?{} - ?{}", sorted_proto.index(), sorted_ties.index()))
+        ])),
+        format_solution(&sorted_proto),
+        format_solution(&sorted_ties)
+    ));
+
+    Ok(solution)
+}
+
+fn translate_order_by_seq(state: &mut State, inner: &GraphPattern, expressions: &Vec<OrderExpression>) -> Result<SolutionSequence, TranslateError>{
+    let mut solution = translate_pattern_seq(state, inner)?;
+    for expression in expressions.iter().rev() {
+        solution = translate_sort(state, &solution, expression)?;
+    }
+    Ok(solution)
+}
+
+
+fn translate_order_by(state: &mut State, inner: &GraphPattern) -> Result<SolutionMapping, TranslateError>{
+    let inner_solution = translate_pattern(state, inner)?;
+    let solution = SolutionMapping{predicate: state.predicate("irrelevant_order_by"), variables: inner_solution.vars().clone()};
+    state.add_rule(&solution, vec![&inner_solution]);
+    Ok(solution)
+}
+
+
+fn compute_slice(state: &mut State, inner: &SolutionSequence, start: usize, length: Option<usize>) -> Result<SolutionSequence, TranslateError>{
+    let solution = SolutionSequence::new(state, "slice", &inner.external_vars());
+    let upper = match length {
+        None => "".to_string(),
+        Some(l) => format!(", ?{} < {} + {}", solution.index(), start, l)
+    };
+
+    state.add_line(format!(
+        "{} :- {}, {} <= ?{}{}",
+        format_solution_mapped(&solution, HashMap::from([(solution.index(), format!("?{} - {}", solution.index(), start))])),
+        format_solution_mapped(inner, HashMap::from([(inner.index(), format!("?{}", solution.index()))])),
+        start,
+        solution.index(),
+        upper,
+    ));
+
+    Ok(solution)
+}
+
+fn translate_slice_seq(state: &mut State, inner: &GraphPattern, start: usize, length: Option<usize>) -> Result<SolutionSequence, TranslateError>{
+    let inner_solution = translate_pattern_seq(state, inner)?;
+    compute_slice(state, &inner_solution, start, length)
+}
+
+fn translate_slice(state: &mut State, inner: &GraphPattern, start: usize, length: Option<usize>) -> Result<SolutionMapping, TranslateError>{
+    let inner_solution = translate_pattern(state, inner)?;
+    let full_sequence = to_sequence(state, &inner_solution)?;
+    let slice = compute_slice(state, &full_sequence, start, length)?;
+    let solution = SolutionMapping{predicate: state.predicate("slice_set"), variables: slice.external_vars()};
+    state.add_rule(&solution, vec![&slice]);
+    Ok(solution)
+}
+
 fn translate_pattern(state: &mut State, pattern: &GraphPattern) -> Result<SolutionMapping, TranslateError>{
     match pattern {
         GraphPattern::Bgp{patterns} => translate_bgp(state, patterns),
@@ -937,11 +1167,11 @@ fn translate_pattern(state: &mut State, pattern: &GraphPattern) -> Result<Soluti
         GraphPattern::Extend {inner, variable, expression} => translate_extend(state, inner, variable, expression),
         GraphPattern::Minus {left, right} => translate_minus(state, left, right),
         GraphPattern::Values {variables, bindings} => translate_values(state, variables, bindings),
-        //GraphPattern::OrderBy {inner, expression} => Err(PatternNotImplemented(pattern.clone())),
+        GraphPattern::OrderBy {inner, expression: _} => translate_order_by(state, inner),
         GraphPattern::Project{inner, variables} => translate_project(state, inner, variables),
         GraphPattern::Distinct {inner} => translate_distinct(state, inner),
         GraphPattern::Reduced {inner} => translate_distinct(state, inner),
-        //GraphPattern::Slice {inner, start, length} => Err(PatternNotImplemented(pattern.clone())),
+        GraphPattern::Slice {inner, start, length} => translate_slice(state, inner, *start, *length),
         GraphPattern::Group {inner, variables, aggregates} => translate_group_by(state, inner, variables, aggregates),
         //GraphPattern::Service {name, inner, silent} => Err(PatternNotImplemented(pattern.clone())),
         _ => Err(PatternNotImplemented(pattern.clone()))
@@ -950,8 +1180,61 @@ fn translate_pattern(state: &mut State, pattern: &GraphPattern) -> Result<Soluti
 
 fn translate_pattern_multi(state: &mut State, pattern: &GraphPattern) -> Result<SolutionMultiMapping, TranslateError>{
     match pattern {
-        GraphPattern::Distinct{inner} => { translate_distinct_multi(state, inner) },
+        GraphPattern::Bgp{patterns} => translate_bgp_multi(state, patterns),
+        /*GraphPattern::Path {subject, path, object} =>
+            Ok(SolutionMapping::from(
+                translate_path(
+                    state,
+                    Some(translate_node(subject)?),
+                    path,
+                    Some(translate_node(object)?)
+                )?
+            )),*/
+        //GraphPattern::Join {left, right} => translate_join_multi(state, left, right),
+        //GraphPattern::LeftJoin {left, right, expression} => translate_left_join_multi(state, left, right, expression),
+        //GraphPattern::Filter {expr, inner} => translate_filter_multi(state, expr, inner),
+        //GraphPattern::Union {left, right} => translate_union_multi(state, left, right),
+        //GraphPattern::Extend {inner, variable, expression} => translate_extend_multi(state, inner, variable, expression),
+        //GraphPattern::Minus {left, right} => translate_minus_multi(state, left, right),
+        //GraphPattern::Values {variables, bindings} => translate_values_multi(state, variables, bindings),
+        //GraphPattern::OrderBy {inner, expression: _} => translate_order_by_multi(state, inner),
+        //GraphPattern::Project{inner, variables} => translate_project_multi(state, inner, variables),
+        GraphPattern::Distinct {inner} => translate_distinct_multi(state, inner),
+        GraphPattern::Reduced {inner} => translate_distinct_multi(state, inner),
+        //GraphPattern::Slice {inner, start, length} => translate_slice_multi(state, inner, *start, *length),
+        //GraphPattern::Group {inner, variables, aggregates} => translate_group_by_multi(state, inner, variables, aggregates),
+        //GraphPattern::Service {name, inner, silent} => Err(PatternNotImplemented(pattern.clone())),
         _ => Err(MultiPatternNotImplemented(pattern.clone()))
+    }
+}
+
+fn translate_pattern_seq(state: &mut State, pattern: &GraphPattern) -> Result<SolutionSequence, TranslateError>{
+    match pattern {
+        GraphPattern::OrderBy {inner, expression} => translate_order_by_seq(state, inner, expression),
+        GraphPattern::Distinct{inner} | GraphPattern::Reduced {inner} => {
+            let inner_solution = translate_distinct(state, inner)?;
+            to_sequence(state, &inner_solution)
+        },
+        //GraphPattern::Filter {expr, inner} => {},
+        //GraphPattern::Union {left, right} => {},
+        //GraphPattern::Extend {inner, variable, expression} => {},
+        //Minus
+        //Values
+        GraphPattern::OrderBy {inner, expression} => translate_order_by_seq(state, inner, expression),
+        GraphPattern::Project {inner, variables} => translate_project_seq(state, inner, variables),
+        GraphPattern::Slice {inner, start, length} => translate_slice_seq(state, inner, *start, *length),
+        //service
+
+        GraphPattern::Bgp {patterns: _}
+        | GraphPattern::Path {subject: _, path: _, object: _}
+        | GraphPattern::Join {left: _, right: _}
+        | GraphPattern::LeftJoin {left: _, right: _, expression: _}
+        | GraphPattern::Group {aggregates: _, variables: _, inner: _}
+        => {
+            let inner_solution = translate_pattern_multi(state, pattern)?;
+            to_sequence_multi(state, &inner_solution)
+        },
+        _ => Err(SequencePatternNotImplemented(pattern.clone()))
     }
 }
 
@@ -1017,10 +1300,30 @@ fn translate_construct(state: &mut State, pattern: &GraphPattern, template: &Vec
     Ok(solution)
 }
 
+fn is_distinct(pattern: &GraphPattern) -> bool {
+    match pattern {
+        GraphPattern::Distinct {inner: _} => true,
+        _ => false,
+    }
+}
+
 fn translate_query(state: &mut State, query: &Query) -> Result<Box<dyn Solution>, TranslateError>{
     match query {
-        Query::Select {pattern: GraphPattern::Distinct{inner}, dataset: _, base_iri: _} => Ok(Box::new(translate_pattern(state, inner)?)),
-        Query::Select {pattern, dataset: _, base_iri: _} => Ok(Box::new(translate_pattern_multi(state, pattern)?)),
+        Query::Select {
+            pattern: GraphPattern::Distinct{ inner },
+            dataset: _,
+            base_iri: _
+        } => Ok(Box::new(translate_pattern(state, inner)?)),
+        Query::Select {
+            pattern: GraphPattern::Slice {
+                inner,
+                start,
+                length
+            },
+            dataset: _,
+            base_iri: _
+        } if is_distinct(inner) => Ok(Box::new(translate_slice(state, inner, *start, *length)?)),
+        Query::Select {pattern, dataset: _, base_iri: _} => Ok(Box::new(translate_pattern_seq(state, pattern)?)),
         Query::Describe {pattern, dataset: _, base_iri: _} => Ok(Box::new(translate_describe(state, pattern)?)),
         Query::Ask {pattern, dataset: _, base_iri: _} => Ok(Box::new(translate_ask(state, pattern)?)),
         Query::Construct {pattern, dataset: _, base_iri: _, template} => Ok(Box::new(translate_construct(state, pattern, template)?)),

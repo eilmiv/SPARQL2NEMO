@@ -9,6 +9,7 @@ pub enum TranslateError {
     QueryNotImplemented(Query),
     PatternNotImplemented(GraphPattern),
     MultiPatternNotImplemented(GraphPattern),
+    SequencePatternNotImplemented(GraphPattern),
     TermNotImplemented(TermPattern),
     ExpressionNotImplemented(Expression),
     InvalidNumberOfArguments(Function, Vec<Expression>),

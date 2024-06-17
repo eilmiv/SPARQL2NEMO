@@ -77,17 +77,14 @@ fn _test_rust(){
 
 fn _test_translation(){
     let query_str = "
-        prefix wdt: <https://example.com/wdt/>
-prefix wd: <https://example.com/wd/>
-prefix wikibase: <https://example.com/wikibase/>
-prefix bd: <https://example.com/bd/>
+        prefix ex: <https://example.com/>
 
-        SELECT DISTINCT ?item ?itemLabel
-WHERE
-{
-  ?item wdt:P31 wd:Q146. # Must be a cat
-  SERVICE wikibase:label { bd:serviceParam wikibase:language \"[AUTO_LANGUAGE],en\". } # Helps get the label in your language, if not, then en language
-}
+        SELECT ?a ?b ?c
+        WHERE
+        {
+          ?a ?b ?c .
+        }
+        order by ?c DESC(?a)
 
     ";
 
