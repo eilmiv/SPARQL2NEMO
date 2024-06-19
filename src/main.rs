@@ -3,11 +3,15 @@ mod error;
 mod state;
 mod translation;
 mod solution;
+mod nemo_model;
 
 use std::rc::Rc;
 use spargebra::algebra::GraphPattern;
 use spargebra::Query;
 use crate::solution::{Column};
+use nemo_model::{nemo_declare, nemo_add, nemo_def};
+use nemo_model::TypedPredicate;
+use crate::nemo_model::{construct_program, GenState};
 
 fn _test_parsing() {
     let query_str = "
@@ -84,7 +88,7 @@ fn _test_translation(){
         {
           ?a ?b ?c .
         }
-        order by ?c DESC(?a)
+        order by (?a + ?b)
 
     ";
 
@@ -99,7 +103,17 @@ fn _test_translation(){
     }
 }
 
+fn _test_model(){
+    let a = nemo_model::Variable::create("a");
+    let b = nemo_model::Variable::create("b");
+    let x = "abc".to_string();
+    nemo_declare!(p(a, b));
+    nemo_add!(p(x, "true") .);
+
+    print!("{}", construct_program(&p));
+}
+
 
 fn main() {
-    _test_translation();
+    _test_model();
 }

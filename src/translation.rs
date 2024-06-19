@@ -726,13 +726,7 @@ fn translate_distinct(state: &mut State, pattern: &GraphPattern) -> Result<Solut
 
 fn translate_distinct_multi(state: &mut State, pattern: &GraphPattern) -> Result<SolutionMultiMapping, TranslateError> {
     let inner = translate_pattern(state, pattern)?;
-    let solution = SolutionMultiMapping::new(state, "distinct", inner.vars().clone());
-    let mut map = HashMap::new();
-    map.insert(solution.count(), "1".to_string());
-    let head = format_solution_mapped(&solution, map);
-    let body = format_solution(&inner);
-    state.add_line(format!("{head} :- {body}"));
-    Ok(solution)
+    to_multi(state, &inner)
 }
 
 fn translate_union(state: &mut State, left: &Box<GraphPattern>, right: &Box<GraphPattern>) -> Result<SolutionMapping, TranslateError> {
@@ -1210,7 +1204,6 @@ fn translate_pattern_multi(state: &mut State, pattern: &GraphPattern) -> Result<
 
 fn translate_pattern_seq(state: &mut State, pattern: &GraphPattern) -> Result<SolutionSequence, TranslateError>{
     match pattern {
-        GraphPattern::OrderBy {inner, expression} => translate_order_by_seq(state, inner, expression),
         GraphPattern::Distinct{inner} | GraphPattern::Reduced {inner} => {
             let inner_solution = translate_distinct(state, inner)?;
             to_sequence(state, &inner_solution)
