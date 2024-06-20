@@ -22,13 +22,13 @@ impl Variable {
         Variable{label: label.to_string()}
     }
 
-    pub fn create(label: &str) -> Rc<Variable> {
-        Rc::new(Variable::new(label))
+    pub fn create(label: &str) -> VarPtr {
+        VarPtr::new(label)
     }
 }
 
 #[derive(Debug)]
-struct VarPtr {
+pub struct VarPtr {
     ptr: Rc<Variable>
 }
 
@@ -64,7 +64,7 @@ impl Hash for VarPtr {
 #[derive(Debug)]
 struct PredicatePos {
     /// The associated variable
-    variable: Rc<Variable>,
+    variable: VarPtr,
     /// flags to track properties of that position
     properties: u32,
     /// position in predicate, positions are fixed after initialization
@@ -74,7 +74,7 @@ struct PredicatePos {
 }
 
 impl PredicatePos{
-    pub fn new(pos: usize, variable: Rc<Variable>) -> PredicatePos{
+    pub fn new(pos: usize, variable: VarPtr) -> PredicatePos{
         PredicatePos{variable, properties: 0, pos, key: ""}
     }
 }
@@ -83,21 +83,24 @@ impl PredicatePos{
 #[derive(Debug)]
 enum Binding {
     Constant(String),
-    Variable(VarPtr)
+    Variable(VarPtr),
+    Existential(VarPtr),
 }
 
 impl Binding {
     fn nemo_string(&self, var_names: &mut VariableTranslator) -> String {
         match self {
             Binding::Constant(s) => s.clone(),
-            Binding::Variable(v) => format!("?{}", var_names.get(v.clone()))
+            Binding::Variable(v) => format!("?{}", var_names.get(v.clone())),
+            Binding::Existential(v) => format!("!{}", var_names.get(v.clone())),
         }
     }
 
     fn variable(&self) -> VarPtr {
         match self {
-            Binding::Constant(_) => VarPtr::new("var"),
-            Binding::Variable(v) => v.clone()
+            Binding::Constant(_) => VarPtr::new("VAR"),
+            Binding::Variable(v) => v.clone(),
+            Binding::Existential(v) => v.clone(),
         }
     }
 }
@@ -118,6 +121,10 @@ struct BoundPredicate {
 }
 
 impl BoundPredicate {
+    fn new(predicate: PredicatePtr, bindings: Vec<Binding>) -> BoundPredicate {
+        BoundPredicate{predicate, bindings}
+    }
+
     fn nemo_string(&self, var_names: &mut VariableTranslator, state: &mut GenState) -> String {
         let inner = self.bindings.iter()
             .map(|b| b.nemo_string(var_names))
@@ -166,7 +173,7 @@ impl Rule {
             .map(|a| a.nemo_string(&mut var_names, state))
             .collect::<Vec<_>>()
             .join(", ");
-        format!("{predicate_name}({head_inner} :- {body} .")
+        format!("{predicate_name}({head_inner}) :- {body} .")
     }
 }
 
@@ -248,7 +255,7 @@ struct Predicate {
 }
 
 impl Predicate {
-    pub fn new(label: &str, variables: Vec<Rc<Variable>>) -> Self {
+    pub fn new(label: &str, variables: Vec<VarPtr>) -> Self {
         Predicate{
             label: label.to_string(),
             positions: variables
@@ -269,6 +276,23 @@ impl Predicate {
     pub fn add_rule(&mut self, rule: Rule){
         rule.assert_matches(self);
         self.rules.push(rule);
+    }
+
+    pub fn pos_at(&self, pos: usize) -> &PredicatePos {
+        self.positions.get(pos).expect(&format!(
+            "Invalid position {pos}, {} has arity {}",
+            self.label,
+            self.positions.len()
+        ))
+    }
+
+    pub fn var_at(&self, pos: usize) -> VarPtr {
+        self.pos_at(pos).variable.clone()
+    }
+
+    /// if property contains multiple one-bits they all must be satisfied ("and" check)
+    pub fn property_at(&self, property: u32, pos: usize) -> bool {
+        (self.pos_at(pos).properties & property) == property
     }
 }
 
@@ -354,7 +378,7 @@ impl GenState {
 }
 
 #[derive(Debug)]
-struct PredicatePtr {
+pub struct PredicatePtr {
     ptr: Rc<RefCell<Predicate>>
 }
 
@@ -363,7 +387,7 @@ impl PredicatePtr {
         PredicatePtr{ptr: self.ptr.clone()}
     }
 
-    pub fn new(label: &str, variables: Vec<Rc<Variable>>) -> PredicatePtr {
+    pub fn new(label: &str, variables: Vec<VarPtr>) -> PredicatePtr {
         PredicatePtr{ptr: Rc::new(RefCell::new(Predicate::new(label, variables)))}
     }
 
@@ -380,6 +404,17 @@ impl PredicatePtr {
     pub fn label(&self) -> String {
         let p = self.ptr.borrow();
         p.label.clone()
+    }
+
+    pub fn var_at(&self, pos: usize) -> VarPtr {
+        let p = self.ptr.borrow();
+        p.var_at(pos)
+    }
+
+    /// See also [Predicate::property_at]
+    pub fn property_at(&self, property: u32, pos: usize) -> bool {
+        let p = self.ptr.borrow();
+        p.property_at(property, pos)
     }
 
     /// Gets NEMO program for the predicate including dependencies
@@ -415,6 +450,7 @@ impl Hash for PredicatePtr {
 }
 
 pub trait TypedPredicate: Debug{
+    /// an implementation may want to replace some of the variables with new custom variables
     fn create(label: &str, variables: Vec<VarPtr>) -> Self where Self: Sized;
     fn get_predicate(&self) -> PredicatePtr;
 }
@@ -442,7 +478,7 @@ pub struct Basic {
 }
 
 impl TypedPredicate for Basic {
-    fn create(label: &str, variables: Vec<Rc<Variable>>) -> Basic {
+    fn create(label: &str, variables: Vec<VarPtr>) -> Basic {
         Basic{inner: PredicatePtr::new(label, variables)}
     }
 
@@ -452,25 +488,68 @@ impl TypedPredicate for Basic {
 }
 
 
-enum ProtoBinding {
+pub enum ProtoBinding {
     Binding(Binding),
+    NamedConnection(String),
 }
 
-enum ProtoPredicate {
+impl ProtoBinding {
+    fn to_binding(self, default_var: Option<VarPtr>, variables: &mut HashMap<String, VarPtr>) -> Binding {
+        match self {
+            ProtoBinding::Binding(b) => b,
+            ProtoBinding::NamedConnection(name) => {
+                match variables.get(&name) {
+                    Some(v) => Binding::Variable(v.clone()),
+                    None => {
+                        let var = default_var.expect("Variable has to be bound");
+                        variables.insert(name.clone(), var.clone());
+                        Binding::Variable(var)
+                    }
+                }
+            },
+        }
+    }
+}
+
+pub enum ProtoPredicate {
     Explicit(PredicatePtr, Vec<ProtoBinding>),
 }
 
+impl ProtoPredicate {
+    fn compile(
+        self,
+        variables: &mut HashMap<String, VarPtr>,
+        predicates: &mut Vec<BoundPredicate>
+    ) {
+        match self {
+            ProtoPredicate::Explicit(predicate, bindings) => {
+                predicates.push(
+                    BoundPredicate::new(
+                        predicate.clone(),
+                        bindings.into_iter()
+                            .enumerate()
+                            .map(|(i, b)| b.to_binding(
+                                Some(predicate.var_at(i)), variables
+                            ))
+                            .collect()
+                    )
+                )
+            }
+        }
+    }
+}
 
-pub struct RuleBuilder<T: TypedPredicate> {
+
+pub struct RuleBuilder {
     predicate_name: String,
     head: Vec<ProtoBinding>,
     body: Vec<ProtoPredicate>,
     partial_atom: Vec<ProtoBinding>,
-    target_predicate: Option<T>,
+    target_predicate: Option<PredicatePtr>,
 }
 
-impl<T: TypedPredicate> RuleBuilder<T> {
-    pub fn new() -> RuleBuilder<T> {
+impl RuleBuilder {
+    pub fn new() -> RuleBuilder {
         RuleBuilder{
             predicate_name: String::new(),
             head: Vec::new(),
@@ -480,9 +559,9 @@ impl<T: TypedPredicate> RuleBuilder<T> {
         }
     }
 
-    pub fn new_for(predicate: T) -> RuleBuilder<T>{
+    pub fn new_for(predicate: PredicatePtr) -> RuleBuilder{
         let mut result = RuleBuilder::new();
-        result.target_predicate = predicate;
+        result.target_predicate = Some(predicate);
         result
     }
 
@@ -507,25 +586,31 @@ impl<T: TypedPredicate> RuleBuilder<T> {
     fn check(&self){
         assert!(self.partial_atom.is_empty(), "partial atom read");
         if let Some(p) = &self.target_predicate {
-            assert_eq!(p.get_predicate().label(), self.predicate_name, "name mismatch");
+            assert_eq!(p.label(), self.predicate_name, "name mismatch");
+        }
+        else {
+            assert!(!self.predicate_name.is_empty(), "predicate name not set");
         }
     }
 
     fn to_rule(self) -> Rule {
+        let RuleBuilder{head: proto_head, body: proto_body, .. } = self;
+        let mut name_lookup: HashMap<String, VarPtr> = HashMap::new();
+        let mut predicates: Vec<BoundPredicate> = Vec::new();
+
+        for proto_predicate in proto_body{
+            proto_predicate.compile(&mut name_lookup, &mut predicates)
+        }
+
         let mut head: Vec<Binding> = Vec::new();
-        for t in self.head.iter() {
-            // TODO
+        for proto_binding in proto_head {
+            head.push(proto_binding.to_binding(None, &mut name_lookup))
         }
 
-        let mut body: Vec<BoundPredicate> = Vec::new();
-        for a in self.body.iter(){
-            // TODO
-        }
-
-        Rule::new(head, body)
+        Rule::new(head, predicates)
     }
 
-    pub fn to_predicate(self) -> T {
+    pub fn to_predicate<T: TypedPredicate>(self) -> T {
         self.check();
         let name = self.predicate_name.clone();
         let rule = self.to_rule();
@@ -542,13 +627,12 @@ impl<T: TypedPredicate> RuleBuilder<T> {
         self.check();
         let target = match &self.target_predicate {
             None => panic!("no target specified"),
-            Some(t) => t.get_predicate()
+            Some(t) => t.clone()
         };
         let rule = self.to_rule();
         target.add_rule(rule);
     }
 }
-
 
 macro_rules! nemo_declare {
     ($name:ident($($arg:ident),*)) => {
@@ -560,7 +644,39 @@ macro_rules! nemo_declare {
 }
 
 macro_rules! nemo_def {
-    () => {};
+    (
+        $head_name:ident(
+            $(?$head_connection_name:ident),*
+        ) :- $(
+            $body_predicate:ident(
+                $(?$body_connection_name:ident),*
+            )
+        ),+; $predicate_type:ty
+    ) => {
+        let mut builder = crate::nemo_model::RuleBuilder::new();
+        builder.set_property_name(stringify!($head_name));
+
+        $(
+            builder.add_head_binding(
+                crate::nemo_model::ProtoBinding::NamedConnection(
+                    stringify!($head_connection_name).to_string()
+                )
+            );
+        )*
+
+        $(
+            $(
+                builder.add_body_binding(
+                    crate::nemo_model::ProtoBinding::NamedConnection(
+                        stringify!($body_connection_name).to_string()
+                    )
+                );
+            )*
+            builder.finalize_atom({&$body_predicate}.get_predicate());
+        )+
+
+        let mut $head_name = builder.to_predicate::<$predicate_type>();
+    };
 }
 
 macro_rules! nemo_add {
@@ -568,6 +684,39 @@ macro_rules! nemo_add {
         crate::nemo_model::add_fact(&$name,
             crate::nemo_model::Fact::new(vec![$({$arg}.to_string()),*])
         )
+    };
+    (
+        $head_name:ident(
+            $(?$head_connection_name:ident),*
+        ) :- $(
+            $body_predicate:ident(
+                $(?$body_connection_name:ident),*
+            )
+        ),+
+    ) => {
+        let mut builder = crate::nemo_model::RuleBuilder::new_for({&$head_name}.get_predicate());
+        builder.set_property_name(stringify!($head_name));
+
+        $(
+            builder.add_head_binding(
+                crate::nemo_model::ProtoBinding::NamedConnection(
+                    stringify!($head_connection_name).to_string()
+                )
+            );
+        )*
+
+        $(
+            $(
+                builder.add_body_binding(
+                    crate::nemo_model::ProtoBinding::NamedConnection(
+                        stringify!($body_connection_name).to_string()
+                    )
+                );
+            )*
+            builder.finalize_atom({&$body_predicate}.get_predicate());
+        )+
+
+        builder.perform_add();
     };
 }
 

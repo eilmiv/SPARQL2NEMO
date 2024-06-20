@@ -11,7 +11,7 @@ use spargebra::Query;
 use crate::solution::{Column};
 use nemo_model::{nemo_declare, nemo_add, nemo_def};
 use nemo_model::TypedPredicate;
-use crate::nemo_model::{construct_program, GenState};
+use crate::nemo_model::{Basic, construct_program, GenState};
 
 fn _test_parsing() {
     let query_str = "
@@ -108,9 +108,15 @@ fn _test_model(){
     let b = nemo_model::Variable::create("b");
     let x = "abc".to_string();
     nemo_declare!(p(a, b));
-    nemo_add!(p(x, "true") .);
+    nemo_add!(p(&x, "true") .);
+    nemo_add!(p(x, "false") .);
 
-    print!("{}", construct_program(&p));
+    nemo_def!(a(?a, ?b) :- p(?a, ?b); Basic);
+    nemo_def!(b(?a, ?b) :- a(?a, ?b); Basic);
+    nemo_add!(b(?a, ?b) :- p(?b, ?a));
+
+    print!("{}", construct_program(&b));
+    //println!("{:#?}", b);
 }
 
 
