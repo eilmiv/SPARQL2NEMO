@@ -1,6 +1,6 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::fmt::Debug;
+use std::fmt::{Debug, Display, Formatter};
 use std::hash::{Hash, Hasher};
 use std::ops::Add;
 use std::rc::Rc;
@@ -44,6 +44,17 @@ impl VarPtr {
     pub fn clone(&self) -> VarPtr {
         VarPtr{ptr: self.ptr.clone()}
     }
+
+    pub fn distinct_new(&self) -> VarPtr {
+        VarPtr::new(&self.label())
+    }
+}
+
+impl Display for VarPtr {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str("?")?;
+        f.write_str(&self.label())
+    }
 }
 
 impl PartialEq for VarPtr {
@@ -69,7 +80,7 @@ struct PredicatePos {
     properties: u32,
     /// position in predicate, positions are fixed after initialization
     pos: usize,
-    /// the key for defining special positions for [PredicateType]
+    /// the key for defining special positions for [TypedPredicate]
     key: &'static str
 }
 
@@ -108,6 +119,20 @@ impl Binding {
 impl From<VarPtr> for Binding {
     fn from(value: VarPtr) -> Self {
         Binding::Variable(value)
+    }
+}
+
+impl Clone for Binding{
+    fn clone(&self) -> Self {
+        match self {
+            Binding::Variable(v) => Binding::Variable(v.clone()),
+            Binding::Existential(v) => Binding::Existential(v.clone()),
+            Binding::Constant(c) => Binding::Constant(c.clone())
+        }
+    }
+
+    fn clone_from(&mut self, source: &Self) {
+        *self = source.clone();
     }
 }
 
@@ -406,6 +431,11 @@ impl PredicatePtr {
         p.label.clone()
     }
 
+    pub fn vars(&self) -> Vec<VarPtr> {
+        let p = self.ptr.borrow();
+        p.positions.iter().map(|p| p.variable.clone()).collect()
+    }
+
     pub fn var_at(&self, pos: usize) -> VarPtr {
         let p = self.ptr.borrow();
         p.var_at(pos)
@@ -449,10 +479,11 @@ impl Hash for PredicatePtr {
     }
 }
 
-pub trait TypedPredicate: Debug{
+pub trait TypedPredicate: Debug {
     /// an implementation may want to replace some of the variables with new custom variables
     fn create(label: &str, variables: Vec<VarPtr>) -> Self where Self: Sized;
     fn get_predicate(&self) -> PredicatePtr;
+    fn clone(&self) -> Self where Self: Sized;
 }
 
 pub fn add_fact(p: &dyn TypedPredicate, fact: Fact){
@@ -485,12 +516,20 @@ impl TypedPredicate for Basic {
     fn get_predicate(&self) -> PredicatePtr {
         self.inner.clone()
     }
+
+    fn clone(&self) -> Self where Self: Sized {
+        Basic {inner: self.inner.clone()}
+    }
 }
 
 
+#[derive(Clone)]
+#[derive(Debug)]
 pub enum ProtoBinding {
     Binding(Binding),
     NamedConnection(String),
+    VariableSet(String),
+    RenameSet(String),
 }
 
 impl ProtoBinding {
@@ -501,16 +540,19 @@ impl ProtoBinding {
                 match variables.get(&name) {
                     Some(v) => Binding::Variable(v.clone()),
                     None => {
-                        let var = default_var.expect("Variable has to be bound");
+                        let var = default_var.expect(&format!("Connection variable {name} is not bound"));
                         variables.insert(name.clone(), var.clone());
                         Binding::Variable(var)
                     }
                 }
             },
+            ProtoBinding::VariableSet(s) => panic!("VariableSet \"{s}\" not resolved."),
+            ProtoBinding::RenameSet(s) => panic!("RenameSet \"{s}\" not resolved."),
         }
     }
 }
 
+#[derive(Debug)]
 pub enum ProtoPredicate {
     Explicit(PredicatePtr, Vec<ProtoBinding>),
 }
@@ -537,6 +579,51 @@ impl ProtoPredicate {
             }
         }
     }
+}
+
+fn binding_parts<'a, 'b>(proto_bindings: &'a Vec<ProtoBinding>, vars: &'b Vec<VarPtr>) -> (&'a [ProtoBinding], &'b [VarPtr], &'a [ProtoBinding]) {
+    let mut start_len = 0;
+    let mut end_len = 0;
+    let mut in_start = true;
+
+    for b in proto_bindings {
+        if in_start {
+            match b {
+                ProtoBinding::Binding(_) | ProtoBinding::NamedConnection(_) => start_len += 1,
+                ProtoBinding::VariableSet(_) | ProtoBinding::RenameSet(_) => in_start = false
+            }
+        } else {
+            match b {
+                ProtoBinding::Binding(_) | ProtoBinding::NamedConnection(_) => end_len += 1,
+                ProtoBinding::VariableSet(_) | ProtoBinding::RenameSet(_) => {
+                    if end_len > 0 {panic!("Positional binding only allowed at start and end")}
+                }
+            }
+        }
+    }
+    let var_strings: Vec<String> = vars.iter().map(|v| v.to_string()).collect();
+    assert!(start_len <= vars.len(), "can not bind {} (front) variables to positions [{}]", start_len, var_strings.join(", "));
+    assert!(start_len <= (vars.len() - end_len), "{} front and {} back variables are too much for [{}]", start_len, end_len, var_strings.join(", "));
+
+    (
+        &proto_bindings[..start_len],
+        &vars[start_len..(vars.len() - end_len)],
+        &proto_bindings[(proto_bindings.len() - end_len)..]
+    )
+}
+
+fn hash_dedup(vec: &Vec<VarPtr>) -> Vec<VarPtr>{
+    let mut result = Vec::new();
+    let mut done: HashSet<VarPtr> = HashSet::new();
+
+    for v in vec {
+        if !done.contains(&v) {
+            done.insert(v.clone());
+            result.push(v.clone());
+        }
+    }
+
+    result
 }
 
 
@@ -593,10 +680,148 @@ impl RuleBuilder {
         }
     }
 
+    fn resolve_variable_sets(&self) -> (Vec<ProtoBinding>, Vec<ProtoPredicate>){
+        let mut var_predicates: HashMap<VarPtr, u64> = HashMap::new();
+        let mut set_predicates: HashMap<String, u64> = HashMap::new();
+        let mut predicates_with_rename_set: HashSet<PredicatePtr> = HashSet::new();
+
+        // compute which predicate contains which variables and var set bindings
+        // handle head
+        if let Some(target) = &self.target_predicate{
+            let target_vars = target.vars();
+            let (start, middle_vars, end) = binding_parts(&self.head, &target_vars);
+            for var in middle_vars {
+                var_predicates.insert(var.clone(), 1);
+            }
+            for binding in &self.head {
+                 match binding {
+                    ProtoBinding::VariableSet(s) => {
+                        set_predicates.insert(s.clone(), 1);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // handle body
+        for (i, proto_predicate) in self.body.iter().enumerate() {
+            let flag: u64 = { 2u64 }.checked_pow((i + 1) as u32).expect("long predicate lists are not supported");
+            match proto_predicate {
+                ProtoPredicate::Explicit(predicate, bindings) => {
+                    // set vars vor this predicate
+                    let predicate_vars = predicate.vars();
+                    let (start, middle_vars, end) = binding_parts(bindings, &predicate_vars);
+                    for var in middle_vars {
+                        let current_predicates = *var_predicates.get(var).unwrap_or(&0);
+                        var_predicates.insert(var.clone(), current_predicates | flag);
+                    }
+
+                    // check for rename set
+                    let mut has_rename_set = false;
+                    for proto_binding in bindings{
+                        match proto_binding {
+                            ProtoBinding::RenameSet(_) => {has_rename_set = true},
+                            _ => {}
+                        }
+                    }
+
+                    // set var sets for this predicate
+                    if !has_rename_set {
+                        for proto_binding in bindings{
+                            match proto_binding {
+                                ProtoBinding::VariableSet(s) => {
+                                    let current_predicates = *set_predicates.get(s).unwrap_or(&0);
+                                    set_predicates.insert(s.clone(), current_predicates | flag);
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    else {
+                        predicates_with_rename_set.insert(predicate.clone());
+                    }
+                }
+            }
+        }
+        let set_index: HashMap<_, _> = set_predicates.into_iter().map(|(k, v)| (v, k)).collect();
+
+        // Resolve variable and rename sets in body
+        let mut new_body: Vec<ProtoPredicate> = Vec::new();
+        let mut set_variables: HashMap<String, Vec<VarPtr>> = HashMap::new();
+        for proto_predicate in self.body.iter(){
+            match proto_predicate {
+                ProtoPredicate::Explicit(predicate, bindings) => {
+                    let predicate_vars = predicate.vars();
+                    let (start, middle_vars, end) = binding_parts(bindings, &predicate_vars);
+                    let mut new_bindings: Vec<ProtoBinding> = Vec::new();
+                    new_bindings.extend(start.iter().cloned());
+                    for var in middle_vars {
+                        let predicates = *var_predicates.get(var).expect("predicates for var not computed.");
+                        let matched = set_index.get(&predicates).is_some();
+                        let allow_unmatched = predicates_with_rename_set.contains(predicate);
+                        if !(matched || allow_unmatched) {panic!("var {var} in {} could not be bound to any var set", predicate.label())}
+                        if matched {
+                            new_bindings.push(ProtoBinding::Binding(Binding::Variable(var.clone())))
+                        }
+                        else {
+                            new_bindings.push(ProtoBinding::Binding(Binding::Variable(var.distinct_new())))
+                        }
+                        if let Some(var_set) = set_index.get(&predicates){
+                            set_variables.entry(var_set.clone()).or_insert_with(Vec::new).push(var.clone());
+                        }
+                    }
+                    new_bindings.extend(end.iter().cloned());
+                    new_body.push(ProtoPredicate::Explicit(predicate.clone(), new_bindings))
+                }
+            }
+        }
+
+        // resolve head
+        let mut new_head: Vec<ProtoBinding> = Vec::new();
+        if let Some(target) = &self.target_predicate {
+            let predicate_vars = target.vars();
+            let (start, middle_vars, end) = binding_parts(&self.head, &predicate_vars);
+            new_head.extend(start.iter().cloned());
+            for var in middle_vars {
+                let predicates = *var_predicates.get(var).expect("predicates for var in head not computed.");
+                if set_index.get(&predicates).is_some() {
+                    new_head.push(ProtoBinding::Binding(Binding::Variable(var.clone())))
+                }
+                else {
+                    panic!("{var} not found in body")
+                }
+            }
+            new_head.extend(end.iter().cloned());
+        } else {
+            for binding in &self.head {
+                match binding {
+                    ProtoBinding::Binding(Binding::Variable(v)) =>
+                        new_head.push(ProtoBinding::Binding(Binding::Variable(v.clone()))),
+                    ProtoBinding::Binding(Binding::Existential(v)) =>
+                        new_head.push(ProtoBinding::Binding(Binding::Existential(v.clone()))),
+                    ProtoBinding::Binding(Binding::Constant(c)) =>
+                        new_head.push(ProtoBinding::Binding(Binding::Constant(c.clone()))),
+                    ProtoBinding::NamedConnection(n) =>
+                        new_head.push(ProtoBinding::NamedConnection(n.clone())),
+                    ProtoBinding::RenameSet(_) => panic!("rename set in head not allowed"),
+                    ProtoBinding::VariableSet(s) => {
+                        let vars = set_variables.get(s).expect(&format!("Var set {s} not in body"));
+                        for v in hash_dedup(vars) {
+                             new_head.push(ProtoBinding::Binding(Binding::Variable(v)))
+                        }
+                    }
+                }
+            }
+        }
+
+        (new_head, new_body)
+    }
+
     fn to_rule(self) -> Rule {
-        let RuleBuilder{head: proto_head, body: proto_body, .. } = self;
+        let (proto_head, proto_body) = self.resolve_variable_sets();
         let mut name_lookup: HashMap<String, VarPtr> = HashMap::new();
         let mut predicates: Vec<BoundPredicate> = Vec::new();
+
 
         for proto_predicate in proto_body{
             proto_predicate.compile(&mut name_lookup, &mut predicates)
@@ -644,36 +869,88 @@ macro_rules! nemo_declare {
 }
 
 macro_rules! nemo_def {
-    (
+    ( // pattern duplicated for nemo_add but without type
         $head_name:ident(
-            $(?$head_connection_name:ident),*
+            $(
+                $(??$head_var_set:ident)?
+                $(?$head_connection_name:ident)?
+                $($head_expression:expr)?
+            ),*
         ) :- $(
-            $body_predicate:ident(
-                $(?$body_connection_name:ident),*
-            )
+            $(
+                $body_predicate:ident(
+                    $(
+                        $(??*$rename_set:ident)?
+                        $(??$body_var_set:ident)?
+                        $(?$body_connection_name:ident)?
+                        $($body_expression:expr)?
+                    ),*
+                )
+            )?
+            $($body_filter:block)?
         ),+; $predicate_type:ty
     ) => {
         let mut builder = crate::nemo_model::RuleBuilder::new();
+        /*
+        This block is duplicated also at nemo_add.
+
+        The reason for this is that IDE support for using nested macros is limited.
+        ----- DUPLICATED BLOCK -----
+         */
         builder.set_property_name(stringify!($head_name));
 
         $(
             builder.add_head_binding(
-                crate::nemo_model::ProtoBinding::NamedConnection(
-                    stringify!($head_connection_name).to_string()
-                )
+                $(
+                    crate::nemo_model::ProtoBinding::NamedConnection(
+                        stringify!($head_connection_name).to_string()
+                    )
+                )?
+                $(
+                    crate::nemo_model::ProtoBinding::VariableSet(
+                        stringify!($head_var_set).to_string()
+                    )
+                )?
+                $(
+                    crate::nemo_model::ProtoBinding::Binding(
+                        Binding::from($head_expression)
+                    )
+                )?
             );
         )*
 
         $(
             $(
-                builder.add_body_binding(
-                    crate::nemo_model::ProtoBinding::NamedConnection(
-                        stringify!($body_connection_name).to_string()
-                    )
-                );
-            )*
-            builder.finalize_atom({&$body_predicate}.get_predicate());
+                $(
+                    builder.add_body_binding(
+                        $(
+                            crate::nemo_model::ProtoBinding::NamedConnection(
+                                stringify!($body_connection_name).to_string()
+                            )
+                        )?
+                        $(
+                            crate::nemo_model::ProtoBinding::VariableSet(
+                                stringify!($body_var_set).to_string()
+                            )
+                        )?
+                        $(
+                            crate::nemo_model::ProtoBinding::Binding(
+                                Binding::from($body_expression)
+                            )
+                        )?
+                        $(
+                            crate::nemo_model::ProtoBinding::RenameSet(
+                                stringify!($rename_set).to_string()
+                            )
+                        )?
+                    );
+                )*
+                builder.finalize_atom({&$body_predicate}.get_predicate());
+            )?
         )+
+        /*
+        ----- END OF DUPLICATED BLOCK -----
+         */
 
         let mut $head_name = builder.to_predicate::<$predicate_type>();
     };
@@ -685,36 +962,88 @@ macro_rules! nemo_add {
             crate::nemo_model::Fact::new(vec![$({$arg}.to_string()),*])
         )
     };
-    (
+    ( // pattern duplicated for nemo_def but with type
         $head_name:ident(
-            $(?$head_connection_name:ident),*
+            $(
+                $(??$head_var_set:ident)?
+                $(?$head_connection_name:ident)?
+                $($head_expression:expr)?
+            ),*
         ) :- $(
-            $body_predicate:ident(
-                $(?$body_connection_name:ident),*
-            )
+            $(
+                $body_predicate:ident(
+                    $(
+                        $(??*$rename_set:ident)?
+                        $(??$body_var_set:ident)?
+                        $(?$body_connection_name:ident)?
+                        $($body_expression:expr)?
+                    ),*
+                )
+            )?
+            $($body_filter:block)?
         ),+
     ) => {
         let mut builder = crate::nemo_model::RuleBuilder::new_for({&$head_name}.get_predicate());
+        /*
+        This block is duplicated also at nemo_def.
+
+        The reason for this is that IDE support for using nested macros is limited.
+        ----- DUPLICATED BLOCK -----
+         */
         builder.set_property_name(stringify!($head_name));
 
         $(
             builder.add_head_binding(
-                crate::nemo_model::ProtoBinding::NamedConnection(
-                    stringify!($head_connection_name).to_string()
-                )
+                $(
+                    crate::nemo_model::ProtoBinding::NamedConnection(
+                        stringify!($head_connection_name).to_string()
+                    )
+                )?
+                $(
+                    crate::nemo_model::ProtoBinding::VariableSet(
+                        stringify!($head_var_set).to_string()
+                    )
+                )?
+                $(
+                    crate::nemo_model::ProtoBinding::Binding(
+                        Binding::from($head_expression)
+                    )
+                )?
             );
         )*
 
         $(
             $(
-                builder.add_body_binding(
-                    crate::nemo_model::ProtoBinding::NamedConnection(
-                        stringify!($body_connection_name).to_string()
-                    )
-                );
-            )*
-            builder.finalize_atom({&$body_predicate}.get_predicate());
+                $(
+                    builder.add_body_binding(
+                        $(
+                            crate::nemo_model::ProtoBinding::NamedConnection(
+                                stringify!($body_connection_name).to_string()
+                            )
+                        )?
+                        $(
+                            crate::nemo_model::ProtoBinding::VariableSet(
+                                stringify!($body_var_set).to_string()
+                            )
+                        )?
+                        $(
+                            crate::nemo_model::ProtoBinding::Binding(
+                                Binding::from($body_expression)
+                            )
+                        )?
+                        $(
+                            crate::nemo_model::ProtoBinding::RenameSet(
+                                stringify!($rename_set).to_string()
+                            )
+                        )?
+                    );
+                )*
+                builder.finalize_atom({&$body_predicate}.get_predicate());
+            )?
         )+
+        /*
+        ----- END OF DUPLICATED BLOCK -----
+         */
 
         builder.perform_add();
     };
@@ -723,3 +1052,8 @@ macro_rules! nemo_add {
 pub(crate) use nemo_declare;
 pub(crate) use nemo_add;
 pub(crate) use nemo_def;
+
+
+//TODOS:
+// - Expressions / Filters / Aggregates / existential rules / negation
+// - named bindings for types

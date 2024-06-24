@@ -111,9 +111,15 @@ fn _test_model(){
     nemo_add!(p(&x, "true") .);
     nemo_add!(p(x, "false") .);
 
+    let x = {
+        nemo_def!(a(??x) :- p(?a, ??x); Basic);
+        a
+    };
+    let y = x.clone();
     nemo_def!(a(?a, ?b) :- p(?a, ?b); Basic);
-    nemo_def!(b(?a, ?b) :- a(?a, ?b); Basic);
-    nemo_add!(b(?a, ?b) :- p(?b, ?a));
+    nemo_def!(b(??a, ??x) :- a(??a, ??x), x(??x), y(??x); Basic);
+    nemo_add!(b(?a, ?b) :- p(?b, ?a), a(?a, ?b));
+    nemo_add!(a("a", "b") .);
 
     print!("{}", construct_program(&b));
     //println!("{:#?}", b);
