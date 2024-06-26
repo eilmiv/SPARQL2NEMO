@@ -9,9 +9,9 @@ use std::rc::Rc;
 use spargebra::algebra::GraphPattern;
 use spargebra::Query;
 use crate::solution::{Column};
-use nemo_model::{nemo_declare, nemo_add, nemo_def};
+use nemo_model::{nemo_declare, nemo_add, nemo_def, nemo_predicate_type};
 use nemo_model::TypedPredicate;
-use crate::nemo_model::{Basic, construct_program, GenState};
+use crate::nemo_model::{Basic, construct_program};
 
 fn _test_parsing() {
     let query_str = "
@@ -61,6 +61,12 @@ macro_rules! my_vec {
     ($($first:literal),+ . $($second:literal and $($third:literal),+);+) => {vec![$($first),+, $($second, $($third),+),+]};
 }
 
+macro_rules! call_method {
+    ($obj:expr, $method:ident) => {{$obj}.$method()};
+}
+
+const POSITIONS: [&str; 1+{stringify!(a).len()}+1] = ["abc", "xyz", "ooo"];
+
 fn _test_rust(){
     println!("testing rust...");
     let s = String::from("abc");
@@ -76,6 +82,9 @@ fn _test_rust(){
     println!("equal: {}", Rc::ptr_eq(&v1, &v2));
     let v3: Rc<Column> = v2.into();
     println!("{:?}", v3);
+
+    println!("{}", call_method!("xyu", to_uppercase));
+    println!("{}", POSITIONS.iter().position(|s| *s == "xyz").unwrap())
 }
 
 
@@ -103,6 +112,9 @@ fn _test_translation(){
     }
 }
 
+
+nemo_predicate_type!(PTF = f1 f2 ... f3 f4);
+
 fn _test_model(){
     let a = nemo_model::Variable::create("a");
     let b = nemo_model::Variable::create("b");
@@ -112,7 +124,7 @@ fn _test_model(){
     nemo_add!(p(x, "false") .);
 
     let x = {
-        nemo_def!(a(??x) :- p(?a, ??x); Basic);
+        nemo_def!(a(??x) :- p(?opy, ??x); Basic);
         a
     };
     let y = x.clone();
@@ -123,6 +135,9 @@ fn _test_model(){
 
     print!("{}", construct_program(&b));
     //println!("{:#?}", b);
+
+    nemo_def!(f(@f1: ?a, @f1: ?b; ?b, ??inner, ?a; @f3: ?a, @f4: ?a) :- p(??inner), p(?a, ?b); PTF);
+    print!("{}", construct_program(&f));
 }
 
 

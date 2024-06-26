@@ -1,6 +1,6 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::fmt::{Debug, Display, Formatter};
+use std::fmt::{Debug, Display, Formatter, Write};
 use std::hash::{Hash, Hasher};
 use std::ops::Add;
 use std::rc::Rc;
@@ -482,6 +482,7 @@ impl Hash for PredicatePtr {
 pub trait TypedPredicate: Debug {
     /// an implementation may want to replace some of the variables with new custom variables
     fn create(label: &str, variables: Vec<VarPtr>) -> Self where Self: Sized;
+    fn create_dummy() -> Self where Self: Sized;
     fn get_predicate(&self) -> PredicatePtr;
     fn clone(&self) -> Self where Self: Sized;
 }
@@ -513,6 +514,10 @@ impl TypedPredicate for Basic {
         Basic{inner: PredicatePtr::new(label, variables)}
     }
 
+    fn create_dummy() -> Self where Self: Sized {
+        Basic{inner: PredicatePtr::new("", vec![])}
+    }
+
     fn get_predicate(&self) -> PredicatePtr {
         self.inner.clone()
     }
@@ -520,6 +525,119 @@ impl TypedPredicate for Basic {
     fn clone(&self) -> Self where Self: Sized {
         Basic {inner: self.inner.clone()}
     }
+}
+
+
+/// A typed predicate that has a multiplicity as first position
+#[derive(Debug)]
+pub struct WithMultiplicity {
+    /// The actual predicate
+    inner: PredicatePtr
+}
+
+impl TypedPredicate for WithMultiplicity {
+    fn create(label: &str, variables: Vec<VarPtr>) -> WithMultiplicity {
+        assert!(variables.len() > 0, "predicate needs at least arity one for the multiplicity");
+        let mut new_variables = vec![VarPtr::new("COUNT")];
+        let mut vars = variables.into_iter();
+        vars.next();
+        new_variables.extend(vars);
+        WithMultiplicity {inner: PredicatePtr::new(label, new_variables)}
+    }
+
+    fn create_dummy() -> Self where Self: Sized {
+        WithMultiplicity{inner: PredicatePtr::new("", vec![])}
+    }
+
+    fn get_predicate(&self) -> PredicatePtr {
+        self.inner.clone()
+    }
+
+    fn clone(&self) -> Self where Self: Sized {
+        WithMultiplicity{inner: self.inner.clone()}
+    }
+}
+
+impl WithMultiplicity {
+    fn count(&self, builder: &mut RuleBuilder, binding: ProtoBinding){
+        builder.add_named_binding(binding, 0, "count", false)
+    }
+}
+
+
+macro_rules! nemo_predicate_type {
+    ($type_name:ident = $($pos_front:ident)* ... $($pos_back:ident)*) => {
+        const FRONT_POSITIONS:
+            [&str; 0 $(+ stringify!($pos_front).len() * 0 + 1)*]
+            = [$(stringify!($pos_front)),*];
+        const BACK_POSITIONS:
+            [&str; 0 $(+ stringify!($pos_back).len() * 0 + 1)*]
+            = [$(stringify!($pos_back)),*];
+        #[derive(Debug)]
+        pub struct $type_name {
+            /// The actual predicate
+            inner: crate::nemo_model::PredicatePtr
+        }
+
+        impl crate::nemo_model::TypedPredicate for $type_name {
+            fn create(label: &str, variables: Vec<crate::nemo_model::VarPtr>) -> $type_name {
+                assert!(
+                    variables.len() >= FRONT_POSITIONS.len() + BACK_POSITIONS.len(),
+                    "predicate needs at least arity {} for [{} ... {}]",
+                    FRONT_POSITIONS.len() + BACK_POSITIONS.len(),
+                    FRONT_POSITIONS.join(" "),
+                    BACK_POSITIONS.join(" ")
+                );
+                let new_variables = (
+                        FRONT_POSITIONS.iter()
+                        .map(|v| crate::nemo_model::VarPtr::new(&v.to_uppercase()))
+                    ).chain(
+                        variables[FRONT_POSITIONS.len()..variables.len() - BACK_POSITIONS.len()].iter()
+                        .map(|v| v.clone())
+                    ).chain(
+                        BACK_POSITIONS.iter()
+                        .map(|v| crate::nemo_model::VarPtr::new(&v.to_uppercase()))
+                    ).collect();
+                $type_name {inner: crate::nemo_model::PredicatePtr::new(label, new_variables)}
+            }
+
+            fn create_dummy() -> Self where Self: Sized {
+                $type_name{inner: crate::nemo_model::PredicatePtr::new("", vec![])}
+            }
+
+            fn get_predicate(&self) -> crate::nemo_model::PredicatePtr {
+                self.inner.clone()
+            }
+
+            fn clone(&self) -> Self where Self: Sized {
+                $type_name{inner: self.inner.clone()}
+            }
+        }
+
+        impl $type_name {
+            $(
+                fn $pos_front (&self, builder: &mut crate::nemo_model::RuleBuilder, binding: crate::nemo_model::ProtoBinding){
+                    builder.add_named_binding(
+                        binding,
+                        FRONT_POSITIONS.iter().position(|p| *p == stringify!($pos_front)).unwrap(),
+                        stringify!($pos_front),
+                        false
+                    )
+                }
+            )*
+
+            $(
+                fn $pos_back (&self, builder: &mut crate::nemo_model::RuleBuilder, binding: crate::nemo_model::ProtoBinding){
+                    builder.add_named_binding(
+                        binding,
+                        BACK_POSITIONS.len() - 1 - BACK_POSITIONS.iter().position(|p| *p == stringify!($pos_back)).unwrap(),
+                        stringify!($pos_back),
+                        true
+                    )
+                }
+            )*
+        }
+    };
 }
 
 
@@ -633,6 +751,8 @@ pub struct RuleBuilder {
     body: Vec<ProtoPredicate>,
     partial_atom: Vec<ProtoBinding>,
     target_predicate: Option<PredicatePtr>,
+    in_head: bool,
+    expected_len: Option<usize>
 }
 
 impl RuleBuilder {
@@ -642,7 +762,9 @@ impl RuleBuilder {
             head: Vec::new(),
             body: Vec::new(),
             partial_atom: Vec::new(),
-            target_predicate: None
+            target_predicate: None,
+            in_head: true,
+            expected_len: None
         }
     }
 
@@ -650,6 +772,15 @@ impl RuleBuilder {
         let mut result = RuleBuilder::new();
         result.target_predicate = Some(predicate);
         result
+    }
+
+    pub fn start_body_atom(&mut self){
+        if let Some(len) = self.expected_len {
+            assert!(self.in_head, "expected_len should be reset in finalize_atom()");
+            assert_eq!(self.head.len(), len, "There are bindings missing in the end of head.")
+        }
+        self.in_head = false;
+        self.expected_len = None;
     }
 
     pub fn set_property_name(&mut self, name: &str){
@@ -664,8 +795,38 @@ impl RuleBuilder {
         self.partial_atom.push(binding)
     }
 
+    pub fn add_named_binding(&mut self, binding: ProtoBinding, pos: usize, name: &str, in_back: bool) {
+        let bindings = if self.in_head { &self.head } else {&self.partial_atom};
+        let mut message = format!("{name} should be at pos {pos}");
+
+        if in_back {
+            message.push_str(" (counting from back)");
+            let len_estimate = bindings.len() + 1 + pos;
+            if let Some(len) = self.expected_len {
+                assert_eq!(len_estimate, len, "Invalid Position in back: {message}");
+            }
+            else {
+                self.expected_len = Some(len_estimate);
+            }
+        }
+        else {
+            assert_eq!(bindings.len(), pos, "Invalid Position in front: {message}");
+        }
+
+        if self.in_head {
+            self.add_head_binding(binding)
+        }
+        else {
+            self.add_body_binding(binding)
+        }
+    }
+
     pub fn finalize_atom(&mut self, predicate: PredicatePtr){
         let mut new_vec: Vec<ProtoBinding> = Vec::new();
+        if let Some(len) = self.expected_len {
+            assert_eq!(self.partial_atom.len(), len, "There are bindings missing in the end.");
+            self.expected_len = None;
+        }
         std::mem::swap(&mut new_vec, &mut self.partial_atom);
         self.body.push(ProtoPredicate::Explicit(predicate, new_vec));
     }
@@ -872,33 +1033,86 @@ macro_rules! nemo_def {
     ( // pattern duplicated for nemo_add but without type
         $head_name:ident(
             $(
+                $(
+                    @$head_key_front:ident:
+                        $(?$head_connection_name_front:ident)?
+                        $($head_expression_front:expr)?
+                ),+;
+            )?
+
+            $(
                 $(??$head_var_set:ident)?
                 $(?$head_connection_name:ident)?
                 $($head_expression:expr)?
             ),*
+
+            $(
+                ;$(
+                    @$head_key_back:ident:
+                        $(?$head_connection_name_back:ident)?
+                        $($head_expression_back:expr)?
+                ),+
+            )?
+
         ) :- $(
             $(
                 $body_predicate:ident(
+                    $(
+                        $(
+                            @$body_key_front:ident:
+                                $(?$body_connection_name_front:ident)?
+                                $($body_expression_front:expr)?
+                        ),+;
+                    )?
                     $(
                         $(??*$rename_set:ident)?
                         $(??$body_var_set:ident)?
                         $(?$body_connection_name:ident)?
                         $($body_expression:expr)?
                     ),*
+                    $(
+                         ;$(
+                            @$body_key_back:ident:
+                                $(?$body_connection_name_back:ident)?
+                                $($body_expression_back:expr)?
+                        ),+
+                    )?
                 )
             )?
             $($body_filter:block)?
         ),+; $predicate_type:ty
     ) => {
         let mut builder = crate::nemo_model::RuleBuilder::new();
+        let head_predicate = <$predicate_type>::create_dummy();
         /*
         This block is duplicated also at nemo_add.
 
-        The reason for this is that IDE support for using nested macros is limited.
+        The reason for this is that IDE support when calling nested macros is limited.
         ----- DUPLICATED BLOCK -----
          */
         builder.set_property_name(stringify!($head_name));
 
+        // HEAD
+        // head-front
+        $(
+            $(
+                head_predicate.$head_key_front(
+                    &mut builder,
+                    $(
+                        crate::nemo_model::ProtoBinding::NamedConnection(
+                            stringify!($head_connection_name_front).to_string()
+                        )
+                    )?
+                    $(
+                        crate::nemo_model::ProtoBinding::Binding(
+                            Binding::from($head_expression_front)
+                        )
+                    )?
+                );
+            )+
+        )?
+
+        // head-middle
         $(
             builder.add_head_binding(
                 $(
@@ -919,8 +1133,50 @@ macro_rules! nemo_def {
             );
         )*
 
+        // head-back
         $(
             $(
+                head_predicate.$head_key_back(
+                    &mut builder,
+                    $(
+                        crate::nemo_model::ProtoBinding::NamedConnection(
+                            stringify!($head_connection_name_back).to_string()
+                        )
+                    )?
+                    $(
+                        crate::nemo_model::ProtoBinding::Binding(
+                            Binding::from($head_expression_back)
+                        )
+                    )?
+                );
+            )+
+        )?
+
+        // BODY
+        $(
+            // body attoms
+            $(
+                builder.start_body_atom();
+                // attom front
+                $(
+                    $(
+                        {&$body_predicate}.$body_key_front(
+                            &mut builder,
+                            $(
+                                crate::nemo_model::ProtoBinding::NamedConnection(
+                                    stringify!($body_connection_name_front).to_string()
+                                )
+                            )?
+                            $(
+                                crate::nemo_model::ProtoBinding::Binding(
+                                    Binding::from($body_expression_front)
+                                )
+                            )?
+                        );
+                    )+
+                )?
+
+                // attom middle
                 $(
                     builder.add_body_binding(
                         $(
@@ -945,8 +1201,31 @@ macro_rules! nemo_def {
                         )?
                     );
                 )*
+
+                // attom back
+                $(
+                    $(
+                        {&$body_predicate}.$body_key_back(
+                            &mut builder,
+                            $(
+                                crate::nemo_model::ProtoBinding::NamedConnection(
+                                    stringify!($body_connection_name_back).to_string()
+                                )
+                            )?
+                            $(
+                                crate::nemo_model::ProtoBinding::Binding(
+                                    Binding::from($body_expression_back)
+                                )
+                            )?
+                        );
+                    )+
+                )?
+
                 builder.finalize_atom({&$body_predicate}.get_predicate());
             )?
+
+            // body filters
+            // comming soon
         )+
         /*
         ----- END OF DUPLICATED BLOCK -----
@@ -965,33 +1244,86 @@ macro_rules! nemo_add {
     ( // pattern duplicated for nemo_def but with type
         $head_name:ident(
             $(
+                $(
+                    @$head_key_front:ident:
+                        $(?$head_connection_name_front:ident)?
+                        $($head_expression_front:expr)?
+                ),+;
+            )?
+
+            $(
                 $(??$head_var_set:ident)?
                 $(?$head_connection_name:ident)?
                 $($head_expression:expr)?
             ),*
+
+            $(
+                ;$(
+                    @$head_key_back:ident:
+                        $(?$head_connection_name_back:ident)?
+                        $($head_expression_back:expr)?
+                ),+
+            )?
+
         ) :- $(
             $(
                 $body_predicate:ident(
+                    $(
+                        $(
+                            @$body_key_front:ident:
+                                $(?$body_connection_name_front:ident)?
+                                $($body_expression_front:expr)?
+                        ),+;
+                    )?
                     $(
                         $(??*$rename_set:ident)?
                         $(??$body_var_set:ident)?
                         $(?$body_connection_name:ident)?
                         $($body_expression:expr)?
                     ),*
+                    $(
+                         ;$(
+                            @$body_key_back:ident:
+                                $(?$body_connection_name_back:ident)?
+                                $($body_expression_back:expr)?
+                        ),+
+                    )?
                 )
             )?
             $($body_filter:block)?
         ),+
     ) => {
         let mut builder = crate::nemo_model::RuleBuilder::new_for({&$head_name}.get_predicate());
+        let head_predicate = {&$head_name};
         /*
         This block is duplicated also at nemo_def.
 
-        The reason for this is that IDE support for using nested macros is limited.
+        The reason for this is that IDE support when calling nested macros is limited.
         ----- DUPLICATED BLOCK -----
          */
         builder.set_property_name(stringify!($head_name));
 
+        // HEAD
+        // head-front
+        $(
+            $(
+                head_predicate.$head_key_front(
+                    &mut builder,
+                    $(
+                        crate::nemo_model::ProtoBinding::NamedConnection(
+                            stringify!($head_connection_name_front).to_string()
+                        )
+                    )?
+                    $(
+                        crate::nemo_model::ProtoBinding::Binding(
+                            Binding::from($head_expression_front)
+                        )
+                    )?
+                );
+            )+
+        )?
+
+        // head-middle
         $(
             builder.add_head_binding(
                 $(
@@ -1012,8 +1344,50 @@ macro_rules! nemo_add {
             );
         )*
 
+        // head-back
         $(
             $(
+                head_predicate.$head_key_back(
+                    &mut builder,
+                    $(
+                        crate::nemo_model::ProtoBinding::NamedConnection(
+                            stringify!($head_connection_name_back).to_string()
+                        )
+                    )?
+                    $(
+                        crate::nemo_model::ProtoBinding::Binding(
+                            Binding::from($head_expression_back)
+                        )
+                    )?
+                );
+            )+
+        )?
+
+        // BODY
+        $(
+            // body attoms
+            $(
+                builder.start_body_atom();
+                // attom front
+                $(
+                    $(
+                        {&$body_predicate}.$body_key_front(
+                            &mut builder,
+                            $(
+                                crate::nemo_model::ProtoBinding::NamedConnection(
+                                    stringify!($body_connection_name_front).to_string()
+                                )
+                            )?
+                            $(
+                                crate::nemo_model::ProtoBinding::Binding(
+                                    Binding::from($body_expression_front)
+                                )
+                            )?
+                        );
+                    )+
+                )?
+
+                // attom middle
                 $(
                     builder.add_body_binding(
                         $(
@@ -1038,8 +1412,31 @@ macro_rules! nemo_add {
                         )?
                     );
                 )*
+
+                // attom back
+                $(
+                    $(
+                        {&$body_predicate}.$body_key_back(
+                            &mut builder,
+                            $(
+                                crate::nemo_model::ProtoBinding::NamedConnection(
+                                    stringify!($body_connection_name_back).to_string()
+                                )
+                            )?
+                            $(
+                                crate::nemo_model::ProtoBinding::Binding(
+                                    Binding::from($body_expression_back)
+                                )
+                            )?
+                        );
+                    )+
+                )?
+
                 builder.finalize_atom({&$body_predicate}.get_predicate());
             )?
+
+            // body filters
+            // comming soon
         )+
         /*
         ----- END OF DUPLICATED BLOCK -----
@@ -1052,8 +1449,8 @@ macro_rules! nemo_add {
 pub(crate) use nemo_declare;
 pub(crate) use nemo_add;
 pub(crate) use nemo_def;
+pub(crate) use nemo_predicate_type;
 
 
 //TODOS:
 // - Expressions / Filters / Aggregates / existential rules / negation
-// - named bindings for types
