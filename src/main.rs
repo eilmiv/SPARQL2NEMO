@@ -142,7 +142,8 @@ fn _test_model(){
 
     let v1 = nemo_var!(v1);
     let v2 = nemo_model::Variable::create("2");
-    nemo_def!(g(v1, "abc", 7, true, 4.4, nemo_call!(DO_IT; v1, 1) + 2 + 3) :- p(v2, v1); Basic);
+    let rr = nemo_var!(!rr);
+    nemo_def!(g(v1, "abc", 7, true, 4.4, rr, rr, nemo_var!(!rr), nemo_call!(DO_IT; v1, 1) + 2 + 3) :- p(v2, v1); Basic);
     print!("{}", construct_program(&g));
 }
 

@@ -28,7 +28,16 @@ impl Variable {
 }
 
 macro_rules! nemo_var {
-    ($label:ident) => {crate::nemo_model::Variable::create(stringify!($label))};
+    (!$label:ident) => {
+        crate::nemo_model::Binding::Existential(
+            crate::nemo_model::Variable::create(stringify!($label))
+        )
+    };
+    ($label:ident) => {
+        crate::nemo_model::Binding::Variable(
+            crate::nemo_model::Variable::create(stringify!($label))
+        )
+    };
 }
 
 #[derive(Debug)]
@@ -1626,5 +1635,4 @@ pub(crate) use nemo_call;
 //TODOS:
 // - Filters
 // - Aggregates
-// - existential rules
 // - negation
