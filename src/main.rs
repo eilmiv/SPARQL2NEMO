@@ -9,7 +9,7 @@ use std::rc::Rc;
 use spargebra::algebra::GraphPattern;
 use spargebra::Query;
 use crate::solution::{Column};
-use nemo_model::{nemo_declare, nemo_add, nemo_def, nemo_predicate_type};
+use nemo_model::{nemo_declare, nemo_add, nemo_def, nemo_predicate_type, nemo_var, nemo_call};
 use nemo_model::TypedPredicate;
 use crate::nemo_model::{Basic, construct_program};
 
@@ -114,6 +114,7 @@ fn _test_translation(){
 
 
 nemo_predicate_type!(PTF = f1 f2 ... f3 f4);
+nemo_predicate_type!(PTF2 = f1 f2 ... f3 f4);
 
 fn _test_model(){
     let a = nemo_model::Variable::create("a");
@@ -136,8 +137,13 @@ fn _test_model(){
     print!("{}", construct_program(&b));
     //println!("{:#?}", b);
 
-    nemo_def!(f(@f1: ?a, @f1: ?b; ?b, ??inner, ?a; @f3: ?a, @f4: ?a) :- p(??inner), p(?a, ?b); PTF);
+    nemo_def!(f(@f1: ?a, @f2: ?b; ?b, ??inner, ?a; @f3: ?a, @f4: ?a) :- p(??inner), p(?a, ?b); PTF);
     print!("{}", construct_program(&f));
+
+    let v1 = nemo_var!(v1);
+    let v2 = nemo_model::Variable::create("2");
+    nemo_def!(g(v1, "abc", 7, true, 4.4, nemo_call!(DO_IT; v1, 1) + 2 + 3) :- p(v2, v1); Basic);
+    print!("{}", construct_program(&g));
 }
 
 

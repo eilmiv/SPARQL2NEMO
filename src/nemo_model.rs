@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fmt::{Debug, Display, Formatter, Write};
 use std::hash::{Hash, Hasher};
-use std::ops::Add;
+use std::ops;
 use std::rc::Rc;
 
 const TRUE: &'static str = "\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>";
@@ -25,6 +25,10 @@ impl Variable {
     pub fn create(label: &str) -> VarPtr {
         VarPtr::new(label)
     }
+}
+
+macro_rules! nemo_var {
+    ($label:ident) => {crate::nemo_model::Variable::create(stringify!($label))};
 }
 
 #[derive(Debug)]
@@ -90,12 +94,91 @@ impl PredicatePos{
     }
 }
 
+#[derive(Debug)]
+#[derive(Clone)]
+pub struct Call {
+    func: String,
+    params: Vec<Binding>
+}
+
+impl Call {
+    pub fn new(func: &str, params: Vec<Binding>) -> Call {
+        Call{func: func.to_string(), params}
+    }
+
+    fn nemo_string(&self, var_names: &mut VariableTranslator) -> String {
+        let str_vec: Vec<String> = self.params.iter().map(|p| p.nemo_string(var_names)).collect();
+        format!(
+            "{}({})",
+            self.func,
+            str_vec.join(", ")
+        )
+    }
+}
+
+macro_rules! nemo_call {
+    ($func:ident; $($param:expr),*) => {
+        crate::nemo_model::Binding::Call(
+            crate::nemo_model::Call::new(
+                stringify!($func), vec![
+                    $(crate::nemo_model::Binding::from(&$param)),*
+                ]
+            )
+        )
+    };
+}
+
+#[derive(Debug)]
+#[derive(Clone)]
+pub struct Operation {
+    op: String,
+    left: Option<Box<Binding>>,
+    right: Box<Binding>,
+}
+
+impl Operation {
+    pub fn new(op: &str, left: Binding, right: Binding) -> Operation {
+        Operation {op: op.to_string(), left: Some(Box::new(left)), right: Box::new(right)}
+    }
+
+    fn nemo_string(&self, var_names: &mut VariableTranslator) -> String {
+        let mut format_operand = |operand: &Binding| -> String {
+            match operand {
+                Binding::Constant(_)
+                | Binding::Existential(_)
+                | Binding::Variable(_)
+                | Binding::Call(_) => operand.nemo_string(var_names),
+                Binding::Operation(o) => format!("({})", o.nemo_string(var_names))
+            }
+        };
+        let mut left = "".to_string();
+        if let Some(l) = &self.left {
+            left = format_operand(l);
+        }
+        format!(
+            "{left} {} {}",
+            self.op,
+            format_operand(&self.right)
+        )
+    }
+
+    fn var_name(&self) -> &'static str {
+        match self.op.as_str() {
+            "+" => "SUM",
+            "*" => "PRODUCT",
+            _ => "OPERATION"
+        }
+    }
+}
+
 /// A binding of a predicate position in a [Rule]
 #[derive(Debug)]
-enum Binding {
+pub enum Binding {
     Constant(String),
     Variable(VarPtr),
     Existential(VarPtr),
+    Call(Call),
+    Operation(Operation),
 }
 
 impl Binding {
@@ -104,21 +187,19 @@ impl Binding {
             Binding::Constant(s) => s.clone(),
             Binding::Variable(v) => format!("?{}", var_names.get(v.clone())),
             Binding::Existential(v) => format!("!{}", var_names.get(v.clone())),
+            Binding::Call(c) => c.nemo_string(var_names),
+            Binding::Operation(o) => o.nemo_string(var_names),
         }
     }
 
     fn variable(&self) -> VarPtr {
         match self {
-            Binding::Constant(_) => VarPtr::new("VAR"),
+            Binding::Constant(_) => VarPtr::new("CONST"),
             Binding::Variable(v) => v.clone(),
             Binding::Existential(v) => v.clone(),
+            Binding::Call(c) => VarPtr::new(&c.func.to_uppercase()),
+            Binding::Operation(o) => VarPtr::new(o.var_name()),
         }
-    }
-}
-
-impl From<VarPtr> for Binding {
-    fn from(value: VarPtr) -> Self {
-        Binding::Variable(value)
     }
 }
 
@@ -127,7 +208,9 @@ impl Clone for Binding{
         match self {
             Binding::Variable(v) => Binding::Variable(v.clone()),
             Binding::Existential(v) => Binding::Existential(v.clone()),
-            Binding::Constant(c) => Binding::Constant(c.clone())
+            Binding::Constant(c) => Binding::Constant(c.clone()),
+            Binding::Call(c) => Binding::Call(c.clone()),
+            Binding::Operation(o) => Binding::Operation(o.clone()),
         }
     }
 
@@ -135,6 +218,95 @@ impl Clone for Binding{
         *self = source.clone();
     }
 }
+
+impl From<&VarPtr> for Binding {
+    fn from(value: &VarPtr) -> Self {
+        Binding::Variable(value.clone())
+    }
+}
+
+impl From<&&str> for Binding {
+    fn from(value: &&str) -> Self {
+        Binding::Constant(format!("\"{}\"", value))
+    }
+}
+
+impl From<&str> for Binding {
+    fn from(value: &str) -> Self {
+        Binding::Constant(format!("\"{}\"", value))
+    }
+}
+
+impl From<&usize> for Binding {
+    fn from(value: &usize) -> Self {
+        Binding::Constant(format!("{}", value))
+    }
+}
+
+impl From<usize> for Binding {
+    fn from(value: usize) -> Self {
+        Binding::Constant(format!("{}", value))
+    }
+}
+
+impl From<&bool> for Binding {
+    fn from(value: &bool) -> Self {
+        Binding::Constant(if *value {TRUE.to_string()} else {FALSE.to_string()})
+    }
+}
+
+impl From<bool> for Binding {
+    fn from(value: bool) -> Self {
+        Binding::Constant(if value {TRUE.to_string()} else {FALSE.to_string()})
+    }
+}
+
+impl From<&f64> for Binding {
+    fn from(value: &f64) -> Self {
+        Binding::Constant(value.to_string())
+    }
+}
+
+impl From<f64> for Binding {
+    fn from(value: f64) -> Self {
+        Binding::Constant(value.to_string())
+    }
+}
+
+impl From<&Call> for Binding {
+    fn from(value: &Call) -> Self {
+        Binding::Call(value.clone())
+    }
+}
+
+impl From<Call> for Binding {
+    fn from(value: Call) -> Self {
+        Binding::Call(value.clone())
+    }
+}
+
+impl From<&Binding> for Binding {
+    fn from(value: &Binding) -> Self {
+        value.clone()
+    }
+}
+
+macro_rules! binding_operator {
+    ($class_name:ident, $func_name:ident, $op:literal) => {
+        impl<T: Into<Binding>> ops::$class_name<T> for Binding where Binding: From<T> {
+            type Output = Binding;
+
+            fn $func_name(self, rhs: T) -> Self::Output {
+                Binding::Operation(Operation::new($op, self, Binding::from(rhs)))
+            }
+        }
+    };
+}
+
+binding_operator!(Add, add, "+");
+binding_operator!(Mul, mul, "*");
+binding_operator!(Div, div, "/");
+binding_operator!(Sub, sub, "-");
 
 /// A predicate with bound positions
 #[derive(Debug)]
@@ -226,7 +398,7 @@ impl VariableTranslator {
             }
         }
 
-        let new_name = self.names.get(variable.label());
+        let new_name = self.names.get(label_to_use);
         self.mapping.insert(variable, new_name.clone());
         new_name
     }
@@ -567,12 +739,6 @@ impl WithMultiplicity {
 
 macro_rules! nemo_predicate_type {
     ($type_name:ident = $($pos_front:ident)* ... $($pos_back:ident)*) => {
-        const FRONT_POSITIONS:
-            [&str; 0 $(+ stringify!($pos_front).len() * 0 + 1)*]
-            = [$(stringify!($pos_front)),*];
-        const BACK_POSITIONS:
-            [&str; 0 $(+ stringify!($pos_back).len() * 0 + 1)*]
-            = [$(stringify!($pos_back)),*];
         #[derive(Debug)]
         pub struct $type_name {
             /// The actual predicate
@@ -582,20 +748,20 @@ macro_rules! nemo_predicate_type {
         impl crate::nemo_model::TypedPredicate for $type_name {
             fn create(label: &str, variables: Vec<crate::nemo_model::VarPtr>) -> $type_name {
                 assert!(
-                    variables.len() >= FRONT_POSITIONS.len() + BACK_POSITIONS.len(),
+                    variables.len() >= $type_name::FRONT_POSITIONS.len() + $type_name::BACK_POSITIONS.len(),
                     "predicate needs at least arity {} for [{} ... {}]",
-                    FRONT_POSITIONS.len() + BACK_POSITIONS.len(),
-                    FRONT_POSITIONS.join(" "),
-                    BACK_POSITIONS.join(" ")
+                    $type_name::FRONT_POSITIONS.len() + $type_name::BACK_POSITIONS.len(),
+                    $type_name::FRONT_POSITIONS.join(" "),
+                    $type_name::BACK_POSITIONS.join(" ")
                 );
                 let new_variables = (
-                        FRONT_POSITIONS.iter()
+                        $type_name::FRONT_POSITIONS.iter()
                         .map(|v| crate::nemo_model::VarPtr::new(&v.to_uppercase()))
                     ).chain(
-                        variables[FRONT_POSITIONS.len()..variables.len() - BACK_POSITIONS.len()].iter()
+                        variables[$type_name::FRONT_POSITIONS.len()..variables.len() - $type_name::BACK_POSITIONS.len()].iter()
                         .map(|v| v.clone())
                     ).chain(
-                        BACK_POSITIONS.iter()
+                        $type_name::BACK_POSITIONS.iter()
                         .map(|v| crate::nemo_model::VarPtr::new(&v.to_uppercase()))
                     ).collect();
                 $type_name {inner: crate::nemo_model::PredicatePtr::new(label, new_variables)}
@@ -615,11 +781,18 @@ macro_rules! nemo_predicate_type {
         }
 
         impl $type_name {
+            const FRONT_POSITIONS:
+                [&'static str; 0 $(+ stringify!($pos_front).len() * 0 + 1)*]
+                = [$(stringify!($pos_front)),*];
+            const BACK_POSITIONS:
+                [&'static str; 0 $(+ stringify!($pos_back).len() * 0 + 1)*]
+                = [$(stringify!($pos_back)),*];
+
             $(
                 fn $pos_front (&self, builder: &mut crate::nemo_model::RuleBuilder, binding: crate::nemo_model::ProtoBinding){
                     builder.add_named_binding(
                         binding,
-                        FRONT_POSITIONS.iter().position(|p| *p == stringify!($pos_front)).unwrap(),
+                        $type_name::FRONT_POSITIONS.iter().position(|p| *p == stringify!($pos_front)).unwrap(),
                         stringify!($pos_front),
                         false
                     )
@@ -630,7 +803,7 @@ macro_rules! nemo_predicate_type {
                 fn $pos_back (&self, builder: &mut crate::nemo_model::RuleBuilder, binding: crate::nemo_model::ProtoBinding){
                     builder.add_named_binding(
                         binding,
-                        BACK_POSITIONS.len() - 1 - BACK_POSITIONS.iter().position(|p| *p == stringify!($pos_back)).unwrap(),
+                        $type_name::BACK_POSITIONS.len() - 1 - $type_name::BACK_POSITIONS.iter().position(|p| *p == stringify!($pos_back)).unwrap(),
                         stringify!($pos_back),
                         true
                     )
@@ -956,12 +1129,8 @@ impl RuleBuilder {
         } else {
             for binding in &self.head {
                 match binding {
-                    ProtoBinding::Binding(Binding::Variable(v)) =>
-                        new_head.push(ProtoBinding::Binding(Binding::Variable(v.clone()))),
-                    ProtoBinding::Binding(Binding::Existential(v)) =>
-                        new_head.push(ProtoBinding::Binding(Binding::Existential(v.clone()))),
-                    ProtoBinding::Binding(Binding::Constant(c)) =>
-                        new_head.push(ProtoBinding::Binding(Binding::Constant(c.clone()))),
+                    ProtoBinding::Binding(b) =>
+                        new_head.push(ProtoBinding::Binding(b.clone())),
                     ProtoBinding::NamedConnection(n) =>
                         new_head.push(ProtoBinding::NamedConnection(n.clone())),
                     ProtoBinding::RenameSet(_) => panic!("rename set in head not allowed"),
@@ -1105,7 +1274,7 @@ macro_rules! nemo_def {
                     )?
                     $(
                         crate::nemo_model::ProtoBinding::Binding(
-                            Binding::from($head_expression_front)
+                            crate::nemo_model::Binding::from(&$head_expression_front)
                         )
                     )?
                 );
@@ -1127,7 +1296,7 @@ macro_rules! nemo_def {
                 )?
                 $(
                     crate::nemo_model::ProtoBinding::Binding(
-                        Binding::from($head_expression)
+                        crate::nemo_model::Binding::from(&$head_expression)
                     )
                 )?
             );
@@ -1145,7 +1314,7 @@ macro_rules! nemo_def {
                     )?
                     $(
                         crate::nemo_model::ProtoBinding::Binding(
-                            Binding::from($head_expression_back)
+                            crate::nemo_model::Binding::from(&$head_expression_back)
                         )
                     )?
                 );
@@ -1169,7 +1338,7 @@ macro_rules! nemo_def {
                             )?
                             $(
                                 crate::nemo_model::ProtoBinding::Binding(
-                                    Binding::from($body_expression_front)
+                                    crate::nemo_model::Binding::from(&$body_expression_front)
                                 )
                             )?
                         );
@@ -1191,7 +1360,7 @@ macro_rules! nemo_def {
                         )?
                         $(
                             crate::nemo_model::ProtoBinding::Binding(
-                                Binding::from($body_expression)
+                                crate::nemo_model::Binding::from(&$body_expression)
                             )
                         )?
                         $(
@@ -1214,7 +1383,7 @@ macro_rules! nemo_def {
                             )?
                             $(
                                 crate::nemo_model::ProtoBinding::Binding(
-                                    Binding::from($body_expression_back)
+                                    crate::nemo_model::Binding::from(&$body_expression_back)
                                 )
                             )?
                         );
@@ -1450,7 +1619,12 @@ pub(crate) use nemo_declare;
 pub(crate) use nemo_add;
 pub(crate) use nemo_def;
 pub(crate) use nemo_predicate_type;
+pub(crate) use nemo_var;
+pub(crate) use nemo_call;
 
 
 //TODOS:
-// - Expressions / Filters / Aggregates / existential rules / negation
+// - Filters
+// - Aggregates
+// - existential rules
+// - negation
