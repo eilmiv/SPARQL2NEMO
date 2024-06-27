@@ -40,6 +40,14 @@ macro_rules! nemo_var {
     };
 }
 
+
+macro_rules! nemo_iri {
+    ($immediate_iri:ident) => {crate::nemo_model::Binding::Constant(stringify!($immediate_iri).to_string())};
+    ($literal_iri:literal) => {crate::nemo_model::Binding::Constant(format!("<{}>", $literal_iri))};
+    ($prefix:expr => $suffix:ident) => {crate::nemo_model::Binding::Constant(format!("<{}{}>", $prefix, stringify!($suffix)))};
+    ($prefix:expr => $suffix:literal) => {crate::nemo_model::Binding::Constant(format!("<{}{}>", $prefix, $suffix))};
+}
+
 #[derive(Debug)]
 pub struct VarPtr {
     ptr: Rc<Variable>
@@ -242,6 +250,18 @@ impl From<&&str> for Binding {
 
 impl From<&str> for Binding {
     fn from(value: &str) -> Self {
+        Binding::Constant(format!("\"{}\"", value))
+    }
+}
+
+impl From<&String> for Binding {
+    fn from(value: &String) -> Self {
+        Binding::Constant(format!("\"{}\"", value))
+    }
+}
+
+impl From<String> for Binding {
+    fn from(value: String) -> Self {
         Binding::Constant(format!("\"{}\"", value))
     }
 }
@@ -830,6 +850,7 @@ pub enum ProtoBinding {
     NamedConnection(String),
     VariableSet(String),
     RenameSet(String),
+    Aggregate(String, Vec<ProtoBinding>),
 }
 
 impl ProtoBinding {
@@ -848,6 +869,36 @@ impl ProtoBinding {
             },
             ProtoBinding::VariableSet(s) => panic!("VariableSet \"{s}\" not resolved."),
             ProtoBinding::RenameSet(s) => panic!("RenameSet \"{s}\" not resolved."),
+            ProtoBinding::Aggregate(name, sub_bindings) => {
+                Binding::Call(Call::new(
+                    &format!("#{name}"),
+                    sub_bindings.into_iter().map(|b| b.to_binding(None, variables)).collect()
+                ))
+            }
+        }
+    }
+
+    fn resolve(&self, set_variables: &HashMap<String, Vec<VarPtr>>) -> Vec<ProtoBinding> {
+        match self {
+            ProtoBinding::Binding(_) | ProtoBinding::NamedConnection(_)  => vec![self.clone()],
+            ProtoBinding::Aggregate(name, sub_bindings) => {
+                vec![ProtoBinding::Aggregate(
+                    name.clone(),
+                    sub_bindings.iter()
+                        .map(|b| b.resolve(set_variables))
+                        .flatten()
+                        .collect()
+                )]
+            },
+            ProtoBinding::RenameSet(_) => panic!("Rename set only allowed in body atoms directly."),
+            ProtoBinding::VariableSet(s) => {
+                let vars = set_variables.get(s).expect(&format!("Var set {s} not bound"));
+                let mut resolved_bindings = Vec::new();
+                for v in hash_dedup(vars) {
+                     resolved_bindings.push(ProtoBinding::Binding(Binding::Variable(v)))
+                }
+                resolved_bindings
+            }
         }
     }
 }
@@ -889,12 +940,12 @@ fn binding_parts<'a, 'b>(proto_bindings: &'a Vec<ProtoBinding>, vars: &'b Vec<Va
     for b in proto_bindings {
         if in_start {
             match b {
-                ProtoBinding::Binding(_) | ProtoBinding::NamedConnection(_) => start_len += 1,
+                ProtoBinding::Binding(_) | ProtoBinding::NamedConnection(_) | ProtoBinding::Aggregate(_, _) => start_len += 1,
                 ProtoBinding::VariableSet(_) | ProtoBinding::RenameSet(_) => in_start = false
             }
         } else {
             match b {
-                ProtoBinding::Binding(_) | ProtoBinding::NamedConnection(_) => end_len += 1,
+                ProtoBinding::Binding(_) | ProtoBinding::NamedConnection(_) | ProtoBinding::Aggregate(_, _) => end_len += 1,
                 ProtoBinding::VariableSet(_) | ProtoBinding::RenameSet(_) => {
                     if end_len > 0 {panic!("Positional binding only allowed at start and end")}
                 }
@@ -1124,7 +1175,9 @@ impl RuleBuilder {
         if let Some(target) = &self.target_predicate {
             let predicate_vars = target.vars();
             let (start, middle_vars, end) = binding_parts(&self.head, &predicate_vars);
-            new_head.extend(start.iter().cloned());
+            new_head.extend(
+                start.iter().cloned().map(|proto_binding| proto_binding.resolve(&set_variables)).flatten()
+            );
             for var in middle_vars {
                 let predicates = *var_predicates.get(var).expect("predicates for var in head not computed.");
                 if set_index.get(&predicates).is_some() {
@@ -1134,23 +1187,13 @@ impl RuleBuilder {
                     panic!("{var} not found in body")
                 }
             }
-            new_head.extend(end.iter().cloned());
+            new_head.extend(
+                end.iter().cloned().map(|proto_binding| proto_binding.resolve(&set_variables)).flatten()
+            );
         } else {
-            for binding in &self.head {
-                match binding {
-                    ProtoBinding::Binding(b) =>
-                        new_head.push(ProtoBinding::Binding(b.clone())),
-                    ProtoBinding::NamedConnection(n) =>
-                        new_head.push(ProtoBinding::NamedConnection(n.clone())),
-                    ProtoBinding::RenameSet(_) => panic!("rename set in head not allowed"),
-                    ProtoBinding::VariableSet(s) => {
-                        let vars = set_variables.get(s).expect(&format!("Var set {s} not in body"));
-                        for v in hash_dedup(vars) {
-                             new_head.push(ProtoBinding::Binding(Binding::Variable(v)))
-                        }
-                    }
-                }
-            }
+            new_head.extend(
+                self.head.iter().map(|binding| binding.resolve(&set_variables)).flatten()
+            );
         }
 
         (new_head, new_body)
@@ -1214,6 +1257,13 @@ macro_rules! nemo_def {
                 $(
                     @$head_key_front:ident:
                         $(?$head_connection_name_front:ident)?
+                        $(%$head_aggregate_front:ident(
+                            $(
+                                $(??$head_aggregate_front_var_set:ident)?
+                                $(?$head_aggregate_front_connection_name:ident)?
+                                $($head_aggregate_front_expression:expr)?
+                            ),+
+                        ))?
                         $($head_expression_front:expr)?
                 ),+;
             )?
@@ -1221,6 +1271,13 @@ macro_rules! nemo_def {
             $(
                 $(??$head_var_set:ident)?
                 $(?$head_connection_name:ident)?
+                $(%$head_aggregate:ident(
+                    $(
+                        $(??$head_aggregate_var_set:ident)?
+                        $(?$head_aggregate_connection_name:ident)?
+                        $($head_aggregate_expression:expr)?
+                    ),+
+                ))?
                 $($head_expression:expr)?
             ),*
 
@@ -1228,6 +1285,13 @@ macro_rules! nemo_def {
                 ;$(
                     @$head_key_back:ident:
                         $(?$head_connection_name_back:ident)?
+                        $(%$head_aggregate_back:ident(
+                            $(
+                                $(??$head_aggregate_back_var_set:ident)?
+                                $(?$head_aggregate_back_connection_name:ident)?
+                                $($head_aggregate_back_expression:expr)?
+                            ),+
+                        ))?
                         $($head_expression_back:expr)?
                 ),+
             )?
@@ -1286,6 +1350,28 @@ macro_rules! nemo_def {
                             crate::nemo_model::Binding::from(&$head_expression_front)
                         )
                     )?
+                    $(
+                        crate::nemo_model::ProtoBinding::Aggregate(
+                            stringify!($head_aggregate_front).to_string(),
+                            vec![$(
+                                $(
+                                    crate::nemo_model::ProtoBinding::NamedConnection(
+                                        stringify!($head_aggregate_front_connection_name).to_string()
+                                    )
+                                )?
+                                $(
+                                    crate::nemo_model::ProtoBinding::VariableSet(
+                                        stringify!($head_aggregate_front_var_set).to_string()
+                                    )
+                                )?
+                                $(
+                                    crate::nemo_model::ProtoBinding::Binding(
+                                        crate::nemo_model::Binding::from(&$head_aggregate_front_expression)
+                                    )
+                                )?
+                            ),+]
+                        )
+                    )?
                 );
             )+
         )?
@@ -1308,6 +1394,28 @@ macro_rules! nemo_def {
                         crate::nemo_model::Binding::from(&$head_expression)
                     )
                 )?
+                $(
+                    crate::nemo_model::ProtoBinding::Aggregate(
+                        stringify!($head_aggregate).to_string(),
+                        vec![$(
+                            $(
+                                crate::nemo_model::ProtoBinding::NamedConnection(
+                                    stringify!($head_aggregate_connection_name).to_string()
+                                )
+                            )?
+                            $(
+                                crate::nemo_model::ProtoBinding::VariableSet(
+                                    stringify!($head_aggregate_var_set).to_string()
+                                )
+                            )?
+                            $(
+                                crate::nemo_model::ProtoBinding::Binding(
+                                    crate::nemo_model::Binding::from(&$head_aggregate_expression)
+                                )
+                            )?
+                        ),+]
+                    )
+                )?
             );
         )*
 
@@ -1324,6 +1432,28 @@ macro_rules! nemo_def {
                     $(
                         crate::nemo_model::ProtoBinding::Binding(
                             crate::nemo_model::Binding::from(&$head_expression_back)
+                        )
+                    )?
+                    $(
+                        crate::nemo_model::ProtoBinding::Aggregate(
+                            stringify!($head_aggregate_back).to_string(),
+                            vec![$(
+                                $(
+                                    crate::nemo_model::ProtoBinding::NamedConnection(
+                                        stringify!($head_aggregate_back_connection_name).to_string()
+                                    )
+                                )?
+                                $(
+                                    crate::nemo_model::ProtoBinding::VariableSet(
+                                        stringify!($head_aggregate_back_var_set).to_string()
+                                    )
+                                )?
+                                $(
+                                    crate::nemo_model::ProtoBinding::Binding(
+                                        crate::nemo_model::Binding::from(&$head_aggregate_back_expression)
+                                    )
+                                )?
+                            ),+]
                         )
                     )?
                 );
@@ -1415,8 +1545,14 @@ macro_rules! nemo_def {
 
 macro_rules! nemo_add {
     ($name:ident($($arg:expr),*) .) => {
+        let bindings = vec![$(crate::nemo_model::Binding::from(&$arg)),*].iter().map(|binding|
+            match binding {
+                crate::nemo_model::Binding::Constant(c) => c.clone(),
+                _ => panic!("Fact bindings should be constants (got {:?})", binding),
+            }
+        ).collect();
         crate::nemo_model::add_fact(&$name,
-            crate::nemo_model::Fact::new(vec![$({$arg}.to_string()),*])
+            crate::nemo_model::Fact::new(bindings)
         )
     };
     ( // pattern duplicated for nemo_def but with type
@@ -1425,6 +1561,13 @@ macro_rules! nemo_add {
                 $(
                     @$head_key_front:ident:
                         $(?$head_connection_name_front:ident)?
+                        $(%$head_aggregate_front:ident(
+                            $(
+                                $(??$head_aggregate_front_var_set:ident)?
+                                $(?$head_aggregate_front_connection_name:ident)?
+                                $($head_aggregate_front_expression:expr)?
+                            ),+
+                        ))?
                         $($head_expression_front:expr)?
                 ),+;
             )?
@@ -1432,6 +1575,13 @@ macro_rules! nemo_add {
             $(
                 $(??$head_var_set:ident)?
                 $(?$head_connection_name:ident)?
+                $(%$head_aggregate:ident(
+                    $(
+                        $(??$head_aggregate_var_set:ident)?
+                        $(?$head_aggregate_connection_name:ident)?
+                        $($head_aggregate_expression:expr)?
+                    ),+
+                ))?
                 $($head_expression:expr)?
             ),*
 
@@ -1439,6 +1589,13 @@ macro_rules! nemo_add {
                 ;$(
                     @$head_key_back:ident:
                         $(?$head_connection_name_back:ident)?
+                        $(%$head_aggregate_back:ident(
+                            $(
+                                $(??$head_aggregate_back_var_set:ident)?
+                                $(?$head_aggregate_back_connection_name:ident)?
+                                $($head_aggregate_back_expression:expr)?
+                            ),+
+                        ))?
                         $($head_expression_back:expr)?
                 ),+
             )?
@@ -1494,7 +1651,29 @@ macro_rules! nemo_add {
                     )?
                     $(
                         crate::nemo_model::ProtoBinding::Binding(
-                            Binding::from($head_expression_front)
+                            crate::nemo_model::Binding::from(&$head_expression_front)
+                        )
+                    )?
+                    $(
+                        crate::nemo_model::ProtoBinding::Aggregate(
+                            stringify!($head_aggregate_front).to_string(),
+                            vec![$(
+                                $(
+                                    crate::nemo_model::ProtoBinding::NamedConnection(
+                                        stringify!($head_aggregate_front_connection_name).to_string()
+                                    )
+                                )?
+                                $(
+                                    crate::nemo_model::ProtoBinding::VariableSet(
+                                        stringify!($head_aggregate_front_var_set).to_string()
+                                    )
+                                )?
+                                $(
+                                    crate::nemo_model::ProtoBinding::Binding(
+                                        crate::nemo_model::Binding::from(&$head_aggregate_front_expression)
+                                    )
+                                )?
+                            ),+]
                         )
                     )?
                 );
@@ -1516,7 +1695,29 @@ macro_rules! nemo_add {
                 )?
                 $(
                     crate::nemo_model::ProtoBinding::Binding(
-                        Binding::from($head_expression)
+                        crate::nemo_model::Binding::from(&$head_expression)
+                    )
+                )?
+                $(
+                    crate::nemo_model::ProtoBinding::Aggregate(
+                        stringify!($head_aggregate).to_string(),
+                        vec![$(
+                            $(
+                                crate::nemo_model::ProtoBinding::NamedConnection(
+                                    stringify!($head_aggregate_connection_name).to_string()
+                                )
+                            )?
+                            $(
+                                crate::nemo_model::ProtoBinding::VariableSet(
+                                    stringify!($head_aggregate_var_set).to_string()
+                                )
+                            )?
+                            $(
+                                crate::nemo_model::ProtoBinding::Binding(
+                                    crate::nemo_model::Binding::from(&$head_aggregate_expression)
+                                )
+                            )?
+                        ),+]
                     )
                 )?
             );
@@ -1534,7 +1735,29 @@ macro_rules! nemo_add {
                     )?
                     $(
                         crate::nemo_model::ProtoBinding::Binding(
-                            Binding::from($head_expression_back)
+                            crate::nemo_model::Binding::from(&$head_expression_back)
+                        )
+                    )?
+                    $(
+                        crate::nemo_model::ProtoBinding::Aggregate(
+                            stringify!($head_aggregate_back).to_string(),
+                            vec![$(
+                                $(
+                                    crate::nemo_model::ProtoBinding::NamedConnection(
+                                        stringify!($head_aggregate_back_connection_name).to_string()
+                                    )
+                                )?
+                                $(
+                                    crate::nemo_model::ProtoBinding::VariableSet(
+                                        stringify!($head_aggregate_back_var_set).to_string()
+                                    )
+                                )?
+                                $(
+                                    crate::nemo_model::ProtoBinding::Binding(
+                                        crate::nemo_model::Binding::from(&$head_aggregate_back_expression)
+                                    )
+                                )?
+                            ),+]
                         )
                     )?
                 );
@@ -1558,7 +1781,7 @@ macro_rules! nemo_add {
                             )?
                             $(
                                 crate::nemo_model::ProtoBinding::Binding(
-                                    Binding::from($body_expression_front)
+                                    crate::nemo_model::Binding::from(&$body_expression_front)
                                 )
                             )?
                         );
@@ -1580,7 +1803,7 @@ macro_rules! nemo_add {
                         )?
                         $(
                             crate::nemo_model::ProtoBinding::Binding(
-                                Binding::from($body_expression)
+                                crate::nemo_model::Binding::from(&$body_expression)
                             )
                         )?
                         $(
@@ -1603,7 +1826,7 @@ macro_rules! nemo_add {
                             )?
                             $(
                                 crate::nemo_model::ProtoBinding::Binding(
-                                    Binding::from($body_expression_back)
+                                    crate::nemo_model::Binding::from(&$body_expression_back)
                                 )
                             )?
                         );
@@ -1629,10 +1852,10 @@ pub(crate) use nemo_add;
 pub(crate) use nemo_def;
 pub(crate) use nemo_predicate_type;
 pub(crate) use nemo_var;
+pub(crate) use nemo_iri;
 pub(crate) use nemo_call;
 
 
 //TODOS:
 // - Filters
-// - Aggregates
 // - negation

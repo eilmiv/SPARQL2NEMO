@@ -9,7 +9,7 @@ use std::rc::Rc;
 use spargebra::algebra::GraphPattern;
 use spargebra::Query;
 use crate::solution::{Column};
-use nemo_model::{nemo_declare, nemo_add, nemo_def, nemo_predicate_type, nemo_var, nemo_call};
+use nemo_model::{nemo_declare, nemo_add, nemo_def, nemo_predicate_type, nemo_var, nemo_call, nemo_iri};
 use nemo_model::TypedPredicate;
 use crate::nemo_model::{Basic, construct_program};
 
@@ -121,8 +121,8 @@ fn _test_model(){
     let b = nemo_model::Variable::create("b");
     let x = "abc".to_string();
     nemo_declare!(p(a, b));
-    nemo_add!(p(&x, "true") .);
-    nemo_add!(p(x, "false") .);
+    nemo_add!(p(x, true) .);
+    nemo_add!(p(x, false) .);
 
     let x = {
         nemo_def!(a(??x) :- p(?opy, ??x); Basic);
@@ -132,7 +132,8 @@ fn _test_model(){
     nemo_def!(a(?a, ?b) :- p(?a, ?b); Basic);
     nemo_def!(b(??a, ??x) :- a(??a, ??x), x(??x), y(??x); Basic);
     nemo_add!(b(?a, ?b) :- p(?b, ?a), a(?a, ?b));
-    nemo_add!(a("a", "b") .);
+    let ex = "https://example.org/";
+    nemo_add!(a(nemo_iri!(a), nemo_iri!(ex => b)) .);
 
     print!("{}", construct_program(&b));
     //println!("{:#?}", b);
@@ -143,8 +144,11 @@ fn _test_model(){
     let v1 = nemo_var!(v1);
     let v2 = nemo_model::Variable::create("2");
     let rr = nemo_var!(!rr);
-    nemo_def!(g(v1, "abc", 7, true, 4.4, rr, rr, nemo_var!(!rr), nemo_call!(DO_IT; v1, 1) + 2 + 3) :- p(v2, v1); Basic);
+    nemo_def!(g(v1, "abc", 7, true, 4.4, rr, rr, nemo_var!(!rr), nemo_call!(DO_IT; v1, 1) + 2 + 3, nemo_iri!(gg)) :- p(v2, v1); Basic);
     print!("{}", construct_program(&g));
+
+    nemo_def!(h(%count(??vars)) :- p(??vars); Basic);
+    print!("{}", construct_program(&h));
 }
 
 
