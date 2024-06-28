@@ -337,6 +337,7 @@ binding_operator!(Mul, mul, "*");
 binding_operator!(Div, div, "/");
 binding_operator!(Sub, sub, "-");
 
+
 /// A predicate with bound positions
 #[derive(Debug)]
 struct BoundPredicate {
@@ -361,6 +362,47 @@ impl BoundPredicate {
     }
 }
 
+/// for filter conditions
+#[derive(Debug)]
+struct SpecialPredicate {
+    bindings: Vec<(Binding, String)>,
+    prefix: String
+}
+
+impl SpecialPredicate {
+    fn new(prefix: String, bindings: Vec<(Binding, String)>) -> SpecialPredicate {
+        SpecialPredicate {bindings, prefix}
+    }
+
+    fn nemo_string(&self, var_names: &mut VariableTranslator) -> String {
+        let binding_strings: Vec<String> = self.bindings.iter().map(
+            |(binding, suffix)|
+            format!(
+                "{}{suffix}",
+                binding.nemo_string(var_names)
+            )
+        ).collect();
+        format!("{}{}", self.prefix, binding_strings.join(""))
+    }
+}
+
+macro_rules! nemo_filter {
+    (
+        $prefix:literal $(
+            ,
+            $(?$var:ident, $var_suffix:literal)?
+            $($expr:expr, $expr_suffix:literal)?
+        )*
+    ) => {
+        crate::nemo_model::ProtoPredicate::Special($prefix.to_string(), vec![
+            $(
+                $(( crate::nemo_model::ProtoBinding::NamedConnection(stringify!($var).to_string()) , $var_suffix.to_string() ))?
+                $(( crate::nemo_model::ProtoBinding::Binding(crate::nemo_model::Binding::from(&$expr)) , $expr_suffix.to_string() ))?
+            ),*
+        ])
+    };
+}
+
 /// A NEMO rule
 /// rules are always stored in [Predicate] instances
 #[derive(Debug)]
@@ -368,12 +410,14 @@ struct Rule {
     /// bindings in predicate that has this rule as definition
     bindings: Vec<Binding>,
     /// rule body
-    body: Vec<BoundPredicate>
+    body: Vec<BoundPredicate>,
+    /// filters
+    filters: Vec<SpecialPredicate>,
 }
 
 impl Rule {
-    fn new(bindings: Vec<Binding>, body: Vec<BoundPredicate>) -> Rule{
-        Rule{bindings, body}
+    fn new(bindings: Vec<Binding>, body: Vec<BoundPredicate>, filters: Vec<SpecialPredicate>) -> Rule{
+        Rule{bindings, body, filters}
     }
 
     fn matches(&self, predicate: &Predicate) -> bool {
@@ -399,7 +443,19 @@ impl Rule {
             .map(|a| a.nemo_string(&mut var_names, state))
             .collect::<Vec<_>>()
             .join(", ");
-        format!("{predicate_name}({head_inner}) :- {body} .")
+        let filters = self.filters.iter()
+            .map(|a| a.nemo_string(&mut var_names))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut result = format!("{predicate_name}({head_inner}) :- {body}");
+
+        if !filters.is_empty() {
+            result.push_str(", ");
+            result.push_str(&filters);
+        }
+        result.push_str(" .");
+
+        result
     }
 }
 
@@ -728,6 +784,12 @@ impl TypedPredicate for Basic {
     }
 }
 
+impl From<&Basic> for ProtoPredicate {
+    fn from(value: &Basic) -> Self {
+        ProtoPredicate::from(value as &dyn TypedPredicate)
+    }
+}
+
 
 /// A typed predicate that has a multiplicity as first position
 #[derive(Debug)]
@@ -756,6 +818,12 @@ impl TypedPredicate for WithMultiplicity {
 
     fn clone(&self) -> Self where Self: Sized {
         WithMultiplicity{inner: self.inner.clone()}
+    }
+}
+
+impl From<&WithMultiplicity> for ProtoPredicate {
+    fn from(value: &WithMultiplicity) -> Self {
+        ProtoPredicate::from(value as &dyn TypedPredicate)
     }
 }
 
@@ -806,6 +874,12 @@ macro_rules! nemo_predicate_type {
 
             fn clone(&self) -> Self where Self: Sized {
                 $type_name{inner: self.inner.clone()}
+            }
+        }
+
+        impl From<&$type_name> for crate::nemo_model::ProtoPredicate {
+            fn from(value: &$type_name) -> Self {
+                crate::nemo_model::ProtoPredicate::from(value as &dyn crate::nemo_model::TypedPredicate)
             }
         }
 
@@ -906,13 +980,15 @@ impl ProtoBinding {
 #[derive(Debug)]
 pub enum ProtoPredicate {
     Explicit(PredicatePtr, Vec<ProtoBinding>),
+    Special(String, Vec<(ProtoBinding, String)>),
 }
 
 impl ProtoPredicate {
     fn compile(
         self,
         variables: &mut HashMap<String, VarPtr>,
-        predicates: &mut Vec<BoundPredicate>
+        predicates: &mut Vec<BoundPredicate>,
+        filters: &mut Vec<SpecialPredicate>,
     ) {
         match self {
             ProtoPredicate::Explicit(predicate, bindings) => {
@@ -928,7 +1004,32 @@ impl ProtoPredicate {
                     )
                 )
             }
+            ProtoPredicate::Special(prefix, bindings) => {
+                filters.push(
+                    SpecialPredicate::new(
+                        prefix,
+                        bindings.into_iter().map(
+                            |(proto, suffix)|
+                                (proto.to_binding(None, variables), suffix)
+                        ).collect()
+                    )
+                )
+            }
         }
+    }
+}
+
+impl From<&dyn TypedPredicate> for ProtoPredicate {
+    fn from(value: &dyn TypedPredicate) -> Self {
+        ProtoPredicate::Explicit(
+            value.get_predicate(),
+            value.get_predicate().vars().iter()
+                .map(
+                    |v|
+                    ProtoBinding::Binding(Binding::Variable(v.clone()))
+                )
+                .collect()
+        )
     }
 }
 
@@ -1064,6 +1165,10 @@ impl RuleBuilder {
         self.body.push(ProtoPredicate::Explicit(predicate, new_vec));
     }
 
+    pub fn add_atom(&mut self, atom: ProtoPredicate) {
+        self.body.push(atom);
+    }
+
     fn check(&self){
         assert!(self.partial_atom.is_empty(), "partial atom read");
         if let Some(p) = &self.target_predicate {
@@ -1104,7 +1209,7 @@ impl RuleBuilder {
                 ProtoPredicate::Explicit(predicate, bindings) => {
                     // set vars vor this predicate
                     let predicate_vars = predicate.vars();
-                    let (start, middle_vars, end) = binding_parts(bindings, &predicate_vars);
+                    let (_start, middle_vars, _end) = binding_parts(bindings, &predicate_vars);
                     for var in middle_vars {
                         let current_predicates = *var_predicates.get(var).unwrap_or(&0);
                         var_predicates.insert(var.clone(), current_predicates | flag);
@@ -1134,6 +1239,10 @@ impl RuleBuilder {
                     else {
                         predicates_with_rename_set.insert(predicate.clone());
                     }
+                },
+                ProtoPredicate::Special(prefix, bindings) => {
+                    // special predicates don't have predicate_vars therefore they can not have
+                    // variable sets
                 }
             }
         }
@@ -1166,6 +1275,15 @@ impl RuleBuilder {
                     }
                     new_bindings.extend(end.iter().cloned());
                     new_body.push(ProtoPredicate::Explicit(predicate.clone(), new_bindings))
+                },
+                ProtoPredicate::Special(prefix, bindings) => {
+                    for (binding, _suffix) in bindings {
+                        match binding {
+                            ProtoBinding::Aggregate(_, _) | ProtoBinding::Binding(_) | ProtoBinding::NamedConnection(_) => {}, // allowed
+                            ProtoBinding::VariableSet(_) | ProtoBinding::RenameSet(_) => {panic!("rename sets and variable sets not allowed in special predicates")}
+                        }
+                    }
+                    new_body.push(ProtoPredicate::Special(prefix.clone(), bindings.clone()));
                 }
             }
         }
@@ -1203,10 +1321,10 @@ impl RuleBuilder {
         let (proto_head, proto_body) = self.resolve_variable_sets();
         let mut name_lookup: HashMap<String, VarPtr> = HashMap::new();
         let mut predicates: Vec<BoundPredicate> = Vec::new();
-
+        let mut filters: Vec<SpecialPredicate> = Vec::new();
 
         for proto_predicate in proto_body{
-            proto_predicate.compile(&mut name_lookup, &mut predicates)
+            proto_predicate.compile(&mut name_lookup, &mut predicates, &mut filters)
         }
 
         let mut head: Vec<Binding> = Vec::new();
@@ -1214,7 +1332,7 @@ impl RuleBuilder {
             head.push(proto_binding.to_binding(None, &mut name_lookup))
         }
 
-        Rule::new(head, predicates)
+        Rule::new(head, predicates, filters)
     }
 
     pub fn to_predicate<T: TypedPredicate>(self) -> T {
@@ -1321,7 +1439,7 @@ macro_rules! nemo_def {
                     )?
                 )
             )?
-            $($body_filter:block)?
+            $($atom_expression:block)?
         ),+; $predicate_type:ty
     ) => {
         let mut builder = crate::nemo_model::RuleBuilder::new();
@@ -1532,8 +1650,10 @@ macro_rules! nemo_def {
                 builder.finalize_atom({&$body_predicate}.get_predicate());
             )?
 
-            // body filters
-            // comming soon
+            // body filters / predicate expressions
+            $(
+                builder.add_atom(crate::nemo_model::ProtoPredicate::from($atom_expression));
+            )?
         )+
         /*
         ----- END OF DUPLICATED BLOCK -----
@@ -1625,7 +1745,7 @@ macro_rules! nemo_add {
                     )?
                 )
             )?
-            $($body_filter:block)?
+            $($atom_expression:block)?
         ),+
     ) => {
         let mut builder = crate::nemo_model::RuleBuilder::new_for({&$head_name}.get_predicate());
@@ -1836,8 +1956,10 @@ macro_rules! nemo_add {
                 builder.finalize_atom({&$body_predicate}.get_predicate());
             )?
 
-            // body filters
-            // comming soon
+            // body filters / predicate expressions
+            $(
+                builder.add_atom(ProtoPredicate::from($atom_expression));
+            )?
         )+
         /*
         ----- END OF DUPLICATED BLOCK -----
@@ -1854,8 +1976,8 @@ pub(crate) use nemo_predicate_type;
 pub(crate) use nemo_var;
 pub(crate) use nemo_iri;
 pub(crate) use nemo_call;
+pub(crate) use nemo_filter;
 
 
 //TODOS:
-// - Filters
 // - negation

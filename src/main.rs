@@ -9,7 +9,7 @@ use std::rc::Rc;
 use spargebra::algebra::GraphPattern;
 use spargebra::Query;
 use crate::solution::{Column};
-use nemo_model::{nemo_declare, nemo_add, nemo_def, nemo_predicate_type, nemo_var, nemo_call, nemo_iri};
+use nemo_model::{nemo_declare, nemo_add, nemo_def, nemo_predicate_type, nemo_var, nemo_call, nemo_iri, nemo_filter};
 use nemo_model::TypedPredicate;
 use crate::nemo_model::{Basic, construct_program};
 
@@ -149,6 +149,9 @@ fn _test_model(){
 
     nemo_def!(h(%count(??vars)) :- p(??vars); Basic);
     print!("{}", construct_program(&h));
+
+    nemo_def!(i(?x, ?b) :- p(?x, ?b), {&p}, {nemo_filter!("", ?x, " < ", 1, "")}; Basic);
+    print!("{}", construct_program(&i));
 }
 
 
