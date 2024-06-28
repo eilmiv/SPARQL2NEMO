@@ -344,12 +344,14 @@ struct BoundPredicate {
     /// The predicate to be used
     predicate: PredicatePtr,
     /// define bindings for some position of the predicate
-    bindings: Vec<Binding>
+    bindings: Vec<Binding>,
+    /// whether the predicate is negated
+    negated: bool
 }
 
 impl BoundPredicate {
-    fn new(predicate: PredicatePtr, bindings: Vec<Binding>) -> BoundPredicate {
-        BoundPredicate{predicate, bindings}
+    fn new(predicate: PredicatePtr, bindings: Vec<Binding>, negated: bool) -> BoundPredicate {
+        BoundPredicate{predicate, bindings, negated}
     }
 
     fn nemo_string(&self, var_names: &mut VariableTranslator, state: &mut GenState) -> String {
@@ -358,7 +360,8 @@ impl BoundPredicate {
             .collect::<Vec<_>>()
             .join(", ");
         let predicate_name = self.predicate.construct_program(state);
-        format!("{predicate_name}({inner})")
+        let negated = if(self.negated) {"~"} else {""};
+        format!("{negated}{predicate_name}({inner})")
     }
 }
 
@@ -979,7 +982,7 @@ impl ProtoBinding {
 
 #[derive(Debug)]
 pub enum ProtoPredicate {
-    Explicit(PredicatePtr, Vec<ProtoBinding>),
+    Explicit(PredicatePtr, Vec<ProtoBinding>, bool),
     Special(String, Vec<(ProtoBinding, String)>),
 }
 
@@ -991,7 +994,7 @@ impl ProtoPredicate {
         filters: &mut Vec<SpecialPredicate>,
     ) {
         match self {
-            ProtoPredicate::Explicit(predicate, bindings) => {
+            ProtoPredicate::Explicit(predicate, bindings, negated) => {
                 predicates.push(
                     BoundPredicate::new(
                         predicate.clone(),
@@ -1000,7 +1003,8 @@ impl ProtoPredicate {
                             .map(|(i, b)| b.to_binding(
                                 Some(predicate.var_at(i)), variables
                             ))
-                            .collect()
+                            .collect(),
+                        negated
                     )
                 )
             }
@@ -1028,7 +1032,8 @@ impl From<&dyn TypedPredicate> for ProtoPredicate {
                     |v|
                     ProtoBinding::Binding(Binding::Variable(v.clone()))
                 )
-                .collect()
+                .collect(),
+            false
         )
     }
 }
@@ -1155,18 +1160,28 @@ impl RuleBuilder {
         }
     }
 
-    pub fn finalize_atom(&mut self, predicate: PredicatePtr){
+    pub fn finalize_atom(&mut self, predicate: PredicatePtr, negated: bool){
         let mut new_vec: Vec<ProtoBinding> = Vec::new();
         if let Some(len) = self.expected_len {
             assert_eq!(self.partial_atom.len(), len, "There are bindings missing in the end.");
             self.expected_len = None;
         }
         std::mem::swap(&mut new_vec, &mut self.partial_atom);
-        self.body.push(ProtoPredicate::Explicit(predicate, new_vec));
+        self.body.push(ProtoPredicate::Explicit(predicate, new_vec, negated));
     }
 
     pub fn add_atom(&mut self, atom: ProtoPredicate) {
         self.body.push(atom);
+    }
+
+    pub fn add_negated_predicate(&mut self, predicate: &dyn TypedPredicate) {
+        let atom = ProtoPredicate::from(predicate);
+        match atom {
+            ProtoPredicate::Explicit(predicate, bindings, negated) => {
+                self.body.push(ProtoPredicate::Explicit(predicate, bindings, !negated));
+            }
+            _ => {panic!("ProtoPredicate from predicate should always be Explicit")}
+        }
     }
 
     fn check(&self){
@@ -1206,7 +1221,7 @@ impl RuleBuilder {
         for (i, proto_predicate) in self.body.iter().enumerate() {
             let flag: u64 = { 2u64 }.checked_pow((i + 1) as u32).expect("long predicate lists are not supported");
             match proto_predicate {
-                ProtoPredicate::Explicit(predicate, bindings) => {
+                ProtoPredicate::Explicit(predicate, bindings, _negated) => {
                     // set vars vor this predicate
                     let predicate_vars = predicate.vars();
                     let (_start, middle_vars, _end) = binding_parts(bindings, &predicate_vars);
@@ -1253,7 +1268,7 @@ impl RuleBuilder {
         let mut set_variables: HashMap<String, Vec<VarPtr>> = HashMap::new();
         for proto_predicate in self.body.iter(){
             match proto_predicate {
-                ProtoPredicate::Explicit(predicate, bindings) => {
+                ProtoPredicate::Explicit(predicate, bindings, negated) => {
                     let predicate_vars = predicate.vars();
                     let (start, middle_vars, end) = binding_parts(bindings, &predicate_vars);
                     let mut new_bindings: Vec<ProtoBinding> = Vec::new();
@@ -1274,7 +1289,7 @@ impl RuleBuilder {
                         }
                     }
                     new_bindings.extend(end.iter().cloned());
-                    new_body.push(ProtoPredicate::Explicit(predicate.clone(), new_bindings))
+                    new_body.push(ProtoPredicate::Explicit(predicate.clone(), new_bindings, *negated))
                 },
                 ProtoPredicate::Special(prefix, bindings) => {
                     for (binding, _suffix) in bindings {
@@ -1439,7 +1454,32 @@ macro_rules! nemo_def {
                     )?
                 )
             )?
+            $(
+                ~$negated_body_predicate:ident(
+                    $(
+                        $(
+                            @$negated_body_key_front:ident:
+                                $(?$negated_body_connection_name_front:ident)?
+                                $($negated_body_expression_front:expr)?
+                        ),+;
+                    )?
+                    $(
+                        $(??*$negated_rename_set:ident)?
+                        $(??$negated_body_var_set:ident)?
+                        $(?$negated_body_connection_name:ident)?
+                        $($negated_body_expression:expr)?
+                    ),*
+                    $(
+                         ;$(
+                            @$negated_body_key_back:ident:
+                                $(?$negated_body_connection_name_back:ident)?
+                                $($negated_body_expression_back:expr)?
+                        ),+
+                    )?
+                )
+            )?
             $($atom_expression:block)?
+            $(~$negated_atom_expression:block)?
         ),+; $predicate_type:ty
     ) => {
         let mut builder = crate::nemo_model::RuleBuilder::new();
@@ -1647,12 +1687,85 @@ macro_rules! nemo_def {
                     )+
                 )?
 
-                builder.finalize_atom({&$body_predicate}.get_predicate());
+                builder.finalize_atom({&$body_predicate}.get_predicate(), false);
+            )?
+
+            // negated body attoms
+            $(
+                builder.start_body_atom();
+                // attom front
+                $(
+                    $(
+                        {&$negated_body_predicate}.$negated_body_key_front(
+                            &mut builder,
+                            $(
+                                crate::nemo_model::ProtoBinding::NamedConnection(
+                                    stringify!($negated_body_connection_name_front).to_string()
+                                )
+                            )?
+                            $(
+                                crate::nemo_model::ProtoBinding::Binding(
+                                    crate::nemo_model::Binding::from(&$negated_body_expression_front)
+                                )
+                            )?
+                        );
+                    )+
+                )?
+
+                // attom middle
+                $(
+                    builder.add_body_binding(
+                        $(
+                            crate::nemo_model::ProtoBinding::NamedConnection(
+                                stringify!($negated_body_connection_name).to_string()
+                            )
+                        )?
+                        $(
+                            crate::nemo_model::ProtoBinding::VariableSet(
+                                stringify!($negated_body_var_set).to_string()
+                            )
+                        )?
+                        $(
+                            crate::nemo_model::ProtoBinding::Binding(
+                                crate::nemo_model::Binding::from(&$negated_body_expression)
+                            )
+                        )?
+                        $(
+                            crate::nemo_model::ProtoBinding::RenameSet(
+                                stringify!($negated_rename_set).to_string()
+                            )
+                        )?
+                    );
+                )*
+
+                // attom back
+                $(
+                    $(
+                        {&$negated_body_predicate}.$negated_body_key_back(
+                            &mut builder,
+                            $(
+                                crate::nemo_model::ProtoBinding::NamedConnection(
+                                    stringify!($negated_body_connection_name_back).to_string()
+                                )
+                            )?
+                            $(
+                                crate::nemo_model::ProtoBinding::Binding(
+                                    crate::nemo_model::Binding::from(&$negated_body_expression_back)
+                                )
+                            )?
+                        );
+                    )+
+                )?
+
+                builder.finalize_atom({&$negated_body_predicate}.get_predicate(), true);
             )?
 
             // body filters / predicate expressions
             $(
                 builder.add_atom(crate::nemo_model::ProtoPredicate::from($atom_expression));
+            )?
+            $(
+                builder.add_negated_predicate($negated_atom_expression);
             )?
         )+
         /*
@@ -1745,7 +1858,32 @@ macro_rules! nemo_add {
                     )?
                 )
             )?
+            $(
+                ~$negated_body_predicate:ident(
+                    $(
+                        $(
+                            @$negated_body_key_front:ident:
+                                $(?$negated_body_connection_name_front:ident)?
+                                $($negated_body_expression_front:expr)?
+                        ),+;
+                    )?
+                    $(
+                        $(??*$negated_rename_set:ident)?
+                        $(??$negated_body_var_set:ident)?
+                        $(?$negated_body_connection_name:ident)?
+                        $($negated_body_expression:expr)?
+                    ),*
+                    $(
+                         ;$(
+                            @$negated_body_key_back:ident:
+                                $(?$negated_body_connection_name_back:ident)?
+                                $($negated_body_expression_back:expr)?
+                        ),+
+                    )?
+                )
+            )?
             $($atom_expression:block)?
+            $(~$negated_atom_expression:block)?
         ),+
     ) => {
         let mut builder = crate::nemo_model::RuleBuilder::new_for({&$head_name}.get_predicate());
@@ -1953,12 +2091,85 @@ macro_rules! nemo_add {
                     )+
                 )?
 
-                builder.finalize_atom({&$body_predicate}.get_predicate());
+                builder.finalize_atom({&$body_predicate}.get_predicate(), false);
+            )?
+
+            // negated body attoms
+            $(
+                builder.start_body_atom();
+                // attom front
+                $(
+                    $(
+                        {&$negated_body_predicate}.$negated_body_key_front(
+                            &mut builder,
+                            $(
+                                crate::nemo_model::ProtoBinding::NamedConnection(
+                                    stringify!($negated_body_connection_name_front).to_string()
+                                )
+                            )?
+                            $(
+                                crate::nemo_model::ProtoBinding::Binding(
+                                    crate::nemo_model::Binding::from(&$negated_body_expression_front)
+                                )
+                            )?
+                        );
+                    )+
+                )?
+
+                // attom middle
+                $(
+                    builder.add_body_binding(
+                        $(
+                            crate::nemo_model::ProtoBinding::NamedConnection(
+                                stringify!($negated_body_connection_name).to_string()
+                            )
+                        )?
+                        $(
+                            crate::nemo_model::ProtoBinding::VariableSet(
+                                stringify!($negated_body_var_set).to_string()
+                            )
+                        )?
+                        $(
+                            crate::nemo_model::ProtoBinding::Binding(
+                                crate::nemo_model::Binding::from(&$negated_body_expression)
+                            )
+                        )?
+                        $(
+                            crate::nemo_model::ProtoBinding::RenameSet(
+                                stringify!($negated_rename_set).to_string()
+                            )
+                        )?
+                    );
+                )*
+
+                // attom back
+                $(
+                    $(
+                        {&$negated_body_predicate}.$negated_body_key_back(
+                            &mut builder,
+                            $(
+                                crate::nemo_model::ProtoBinding::NamedConnection(
+                                    stringify!($negated_body_connection_name_back).to_string()
+                                )
+                            )?
+                            $(
+                                crate::nemo_model::ProtoBinding::Binding(
+                                    crate::nemo_model::Binding::from(&$negated_body_expression_back)
+                                )
+                            )?
+                        );
+                    )+
+                )?
+
+                builder.finalize_atom({&$negated_body_predicate}.get_predicate(), true);
             )?
 
             // body filters / predicate expressions
             $(
-                builder.add_atom(ProtoPredicate::from($atom_expression));
+                builder.add_atom(crate::nemo_model::ProtoPredicate::from($atom_expression));
+            )?
+            $(
+                builder.add_negated_predicate($negated_atom_expression);
             )?
         )+
         /*
@@ -1977,7 +2188,3 @@ pub(crate) use nemo_var;
 pub(crate) use nemo_iri;
 pub(crate) use nemo_call;
 pub(crate) use nemo_filter;
-
-
-//TODOS:
-// - negation

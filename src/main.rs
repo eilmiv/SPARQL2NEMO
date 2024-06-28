@@ -150,7 +150,7 @@ fn _test_model(){
     nemo_def!(h(%count(??vars)) :- p(??vars); Basic);
     print!("{}", construct_program(&h));
 
-    nemo_def!(i(?x, ?b) :- p(?x, ?b), {&p}, {nemo_filter!("", ?x, " < ", 1, "")}; Basic);
+    nemo_def!(i(?x, ?b) :- ~p(?x, ?b), ~{&p}, {nemo_filter!("", ?x, " < ", 1, "")}; Basic);
     print!("{}", construct_program(&i));
 }
 
