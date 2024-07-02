@@ -729,7 +729,7 @@ dependencies = [
 [[package]]
 name = "macros"
 version = "0.0.1"
-source = "git+https://github.com/knowsys/nemo#bc3fae265e966e16fb049a9a4bd7f8e771dba347"
+source = "git+https://github.com/eilmiv/nemo#cc56ca9e4324cfcfef02d1ec2681fa1584c667a6"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -794,8 +794,8 @@ dependencies = [
 
 [[package]]
 name = "nemo"
-version = "0.5.1-dev"
-source = "git+https://github.com/knowsys/nemo#bc3fae265e966e16fb049a9a4bd7f8e771dba347"
+version = "0.5.2-dev"
+source = "git+https://github.com/eilmiv/nemo#cc56ca9e4324cfcfef02d1ec2681fa1584c667a6"
 dependencies = [
  "ascii_tree",
  "bytecount",
@@ -828,8 +828,8 @@ dependencies = [
 
 [[package]]
 name = "nemo-physical"
-version = "0.5.1-dev"
-source = "git+https://github.com/knowsys/nemo#bc3fae265e966e16fb049a9a4bd7f8e771dba347"
+version = "0.5.2-dev"
+source = "git+https://github.com/eilmiv/nemo#cc56ca9e4324cfcfef02d1ec2681fa1584c667a6"
 dependencies = [
  "ascii_tree",
  "bitvec",
@@ -848,6 +848,7 @@ dependencies = [
  "reqwest",
  "streaming-iterator",
  "thiserror",
+ "unicode-segmentation",
 ]
 
 [[package]]
@@ -1722,6 +1723,12 @@ checksum = "a56d1686db2308d901306f92a263857ef59ea39678a5458e7cb17f01415101f5"
 dependencies = [
  "tinyvec",
 ]
+
+[[package]]
+name = "unicode-segmentation"
+version = "1.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d4c87d22b6e3f4a18d4d40ef354e97c90fcb14dd91d7dc0aa9d8a1172ebf7202"
 
 [[package]]
 name = "unicode-width"
