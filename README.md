@@ -30,3 +30,10 @@ Run the code using:
 cargo +nightly run
 ```
 
+You may need to install the following packages if you don't have them already:
+```bash
+sudo apt update
+sudo apt install pkg-config
+sudo apt install libssl-dev
+```
+
