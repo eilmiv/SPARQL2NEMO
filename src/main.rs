@@ -124,8 +124,8 @@ fn _test_model(){
     let b = nemo_model::Variable::create("b");
     let x = "abc".to_string();
     nemo_declare!(p(a, b));
-    nemo_add!(p(x, true) .);
-    nemo_add!(p(x, false) .);
+    nemo_add!(p(x, true));
+    nemo_add!(p(x, false));
 
     let x = {
         nemo_def!(a(??x) :- p(?opy, ??x); Basic);
@@ -136,7 +136,7 @@ fn _test_model(){
     nemo_def!(b(??a, ??x) :- a(??a, ??x), x(??x), y(??x); Basic);
     nemo_add!(b(?a, ?b) :- p(?b, ?a), a(?a, ?b));
     let ex = "https://example.org/";
-    nemo_add!(a(nemo_iri!(a), nemo_iri!(ex => b)) .);
+    nemo_add!(a(nemo_iri!(a), nemo_iri!(ex => b)));
 
     print!("{}", construct_program(&b));
     //println!("{:#?}", b);

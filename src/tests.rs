@@ -8,6 +8,7 @@ use nemo::io::resource_providers::ResourceProviders;
 use crate::translation_next::translate;
 
 fn execute_nemo(program_string: String) -> Result<Vec<Vec<AnyDataValue>>, Error> {
+    println!("{}", program_string);
     let program = parse_program(program_string)?;
     let import_manager = ImportManager::new(ResourceProviders::from(vec![]));
     let mut engine: DefaultExecutionEngine = ExecutionEngine::initialize(&program, import_manager)?;
@@ -15,8 +16,11 @@ fn execute_nemo(program_string: String) -> Result<Vec<Vec<AnyDataValue>>, Error>
     let mut output_iterator = program.output_predicates();
     let output_predicate = output_iterator.next().expect("program has no output");
     assert_eq!(output_iterator.next(), None, "program has more than one output");
-    let output = engine.predicate_rows(output_predicate)?.expect("output not defined");
-    Ok(output.collect())
+    let result = match engine.predicate_rows(output_predicate)? {
+        Some(output) => output.collect(),
+        None => vec![]
+    };
+    Ok(result)
 }
 
 fn parse_expectation(expectation: &str) -> Vec<Vec<String>> {
@@ -160,5 +164,112 @@ fn bgp() -> Result<(), Error> {
             1, 3
             1, 4
         "
+    )
+}
+
+#[test]
+fn filter() -> Result<(), Error> {
+    assert_sparql(
+        "
+            prefix ex: <https://example.com/>
+
+            SELECT DISTINCT ?a
+            WHERE
+            {
+                ?a ex:p ?b .
+                FILTER(?b)
+            }
+        ",
+        "
+            @prefix ex: <https://example.com/> .
+
+            input_graph(1, ex:p, 0) .
+            input_graph(2, ex:p, 1) .
+         ",
+        "2"
+    )
+}
+
+#[test]
+fn filter_without_effective_boolean_value() -> Result<(), Error> {
+    assert_sparql(
+        "
+            prefix ex: <https://example.com/>
+
+            SELECT DISTINCT ?a
+            WHERE
+            {
+                ?a ex:p ?b .
+                FILTER(true)
+            }
+        ",
+        "
+            @prefix ex: <https://example.com/> .
+
+            input_graph(1, ex:p, 0) .
+            input_graph(2, ex:p, 1) .
+         ",
+        "1; 2"
+    )
+}
+
+
+#[test]
+fn or() -> Result<(), Error> {
+    assert_sparql(
+        "
+            prefix ex: <https://example.com/>
+
+            SELECT DISTINCT ?a
+            WHERE
+            {
+                ?a ex:p ?x .
+                ?a ex:q ?y .
+                FILTER(?x || ?y)
+            }
+        ",
+        "
+            @prefix ex: <https://example.com/> .
+
+            input_graph(1, ex:p, 0) .
+            input_graph(1, ex:q, 0) .
+            input_graph(2, ex:p, 1) .
+            input_graph(2, ex:q, 0) .
+            input_graph(3, ex:p, 0) .
+            input_graph(3, ex:q, 1) .
+            input_graph(4, ex:p, 1) .
+            input_graph(4, ex:q, 1) .
+         ",
+        "2; 3; 4"
+    )
+}
+
+#[test]
+fn and() -> Result<(), Error> {
+    assert_sparql(
+        "
+            prefix ex: <https://example.com/>
+
+            SELECT DISTINCT ?a
+            WHERE
+            {
+                ?a ex:p ?x .
+                ?a ex:q ?y .
+                FILTER(?x && ?y)
+            }
+        ",
+        "
+            @prefix ex: <https://example.com/> .
+
+            input_graph(1, ex:p, 0) .
+            input_graph(1, ex:q, 0) .
+            input_graph(2, ex:p, 1) .
+            input_graph(2, ex:q, 0) .
+            input_graph(3, ex:p, 0) .
+            input_graph(3, ex:q, 1) .
+            input_graph(4, ex:p, 1) .
+            input_graph(4, ex:q, 1) .
+         ",
+        "4"
     )
 }

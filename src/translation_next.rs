@@ -1,10 +1,10 @@
 use std::collections::HashMap;
-use spargebra::algebra::GraphPattern;
+use spargebra::algebra::{Expression, Function, GraphPattern};
 use spargebra::Query;
-use spargebra::term::{BlankNode, NamedNode, NamedNodePattern, TermPattern, TriplePattern, Variable};
+use spargebra::term::{BlankNode, Literal, NamedNode, NamedNodePattern, TermPattern, TriplePattern, Variable};
 use crate::error::TranslateError;
-use crate::error::TranslateError::{PatternNotImplemented, TermNotImplemented, Todo};
-use crate::nemo_model::{add_rule, Binding, BoundPredicate, construct_program, hash_dedup, nemo_add, nemo_def, nemo_predicate_type, PredicatePtr, Rule, TypedPredicate, VarPtr};
+use crate::error::TranslateError::{ExpressionNotImplemented, PatternNotImplemented, TermNotImplemented, Todo};
+use crate::nemo_model::{add_rule, Binding, BoundPredicate, Call, construct_program, hash_dedup, nemo_add, nemo_call, nemo_declare, nemo_def, nemo_filter, nemo_predicate_type, nemo_var, PredicatePtr, Rule, TypedPredicate, VarPtr};
 
 nemo_predicate_type!(SolutionSet = ...);
 nemo_predicate_type!(SolutionMutliSet = count ...);
@@ -13,6 +13,12 @@ nemo_predicate_type!(SolutionExpression = ... result);
 
 impl From<&NamedNode> for Binding {
     fn from(value: &NamedNode) -> Self {
+        Binding::Constant(value.to_string())
+    }
+}
+
+impl From<&Literal> for Binding {
+    fn from(value: &Literal) -> Self {
         Binding::Constant(value.to_string())
     }
 }
@@ -50,6 +56,77 @@ struct QueryTranslator {
 impl QueryTranslator {
     fn new(input_graph: PredicatePtr) -> QueryTranslator {
         QueryTranslator{sparql_vars: VariableTranslator::new(), input_graph}
+    }
+
+    fn translate_expression_variable(&mut self, var: &Variable, binding: &dyn TypedPredicate) -> Result<SolutionExpression, TranslateError> {
+        let var_binding = self.sparql_vars.get(var);
+        nemo_def!(var(var_binding; @result: var_binding) :- binding(??set_contains_var); SolutionExpression);
+        Ok(var)
+    }
+
+    fn translate_expression_named_node(&mut self, node: &NamedNode) -> Result<SolutionExpression, TranslateError> {
+        let named_node = SolutionExpression::create("named_node", vec![]);
+        nemo_add!(named_node(node.clone()));
+        Ok(named_node)
+    }
+
+    fn translate_expression_literal(&mut self, node: &Literal) -> Result<SolutionExpression, TranslateError> {
+        let named_node = SolutionExpression::create("literal", vec![VarPtr::new("result")]);
+        nemo_add!(named_node(node.clone()));
+        Ok(named_node)
+    }
+
+    fn translate_binary_function(&mut self, func: &str, left: &SolutionExpression, right: &SolutionExpression, binding: &dyn TypedPredicate) -> Result<SolutionExpression, TranslateError> {
+        let l = nemo_var!(l);
+        let r = nemo_var!(r);
+        let call = Call::new(func, vec![l.clone(), r.clone()]);
+        nemo_def!(
+            boolean_or(??vars, ??left_vars, ??right_vars; @result: call) :-
+                binding(??vars, ??left_vars, ??right_vars, ??other_vars),
+                left(??vars, ??left_vars; @result: l),
+                right(??vars, ??right_vars; @result: r)
+            ; SolutionExpression
+        );
+        Ok(boolean_or)
+    }
+
+    fn translate_effective_boolean_value(&mut self, expression: &SolutionExpression) -> Result<SolutionExpression, TranslateError> {
+        // bools
+        nemo_def!(effective_boolean_value(??vars; @result: false) :- expression(??vars; @result: ?v), {nemo_filter!("", ?v, " = ", false, "")}; SolutionExpression);
+        nemo_def!(effective_boolean_value(??vars; @result: true) :- expression(??vars; @result: ?v), {nemo_filter!("", ?v, " = ", true, "")}; SolutionExpression);
+
+        // strings
+        nemo_add!(effective_boolean_value(??vars; @result: false) :- expression(??vars; @result: ?v), {nemo_filter!("STRLEN(", ?v, ") = 0")});
+        nemo_add!(effective_boolean_value(??vars; @result: true) :- expression(??vars; @result: ?v), {nemo_filter!("STRLEN(", ?v, ") > 0")});
+
+        // numbers
+        nemo_add!(effective_boolean_value(??vars; @result: false) :- expression(??vars; @result: ?v), {nemo_filter!("", ?v, " = 0")});
+        nemo_add!(effective_boolean_value(??vars; @result: true) :- expression(??vars; @result: ?v), {nemo_filter!("", ?v, " != 0")}, {nemo_filter!("isNumeric(", ?v, ") = ", true, "")});
+
+        Ok(effective_boolean_value)
+    }
+
+    fn translate_expression(&mut self, expression: &Expression, binding: &dyn TypedPredicate) -> Result<SolutionExpression, TranslateError> {
+        match expression {
+            Expression::Variable(v) => self.translate_expression_variable(v, binding),
+            Expression::NamedNode(n) => self.translate_expression_named_node(n),
+            Expression::Literal(l) => self.translate_expression_literal(l),
+            Expression::Or(left, right) => {
+                let mut left_solution = self.translate_expression(left, binding)?;
+                let mut right_solution = self.translate_expression(right, binding)?;
+                if !Self::expression_known_to_be_bool(left) {left_solution = self.translate_effective_boolean_value(&left_solution)?}
+                if !Self::expression_known_to_be_bool(right) {right_solution = self.translate_effective_boolean_value(&right_solution)?}
+                self.translate_binary_function("OR", &left_solution, &right_solution, binding)
+            },
+            Expression::And(left, right) => {
+                let mut left_solution = self.translate_expression(left, binding)?;
+                let mut right_solution = self.translate_expression(right, binding)?;
+                if !Self::expression_known_to_be_bool(left) {left_solution = self.translate_effective_boolean_value(&left_solution)?}
+                if !Self::expression_known_to_be_bool(right) {right_solution = self.translate_effective_boolean_value(&right_solution)?}
+                self.translate_binary_function("AND", &left_solution, &right_solution, binding)
+            },
+            _ => Err(ExpressionNotImplemented(expression.clone()))
+        }
     }
 
     fn translate_term(&mut self, term: &TermPattern, variables: &mut Vec<VarPtr>, bnode_vars: &mut Vec<VarPtr>) -> Result<Binding, TranslateError> {
@@ -98,6 +175,11 @@ impl QueryTranslator {
         Ok(result)
     }
 
+    fn translate_filter(&mut self, expression: &SolutionExpression, inner: &SolutionSet) -> Result<SolutionSet, TranslateError> {
+        nemo_def!(filter(??expr_vars, ??other_vars) :- inner(??expr_vars, ??other_vars), expression(??expr_vars; @result: true); SolutionSet);
+        Ok(filter)
+    }
+
     fn translate_project(&mut self, inner: &SolutionSet, variables: &Vec<Variable>) -> Result<SolutionSet, TranslateError> {
         let nemo_vars: Vec<VarPtr> = variables.into_iter().map(|v| self.sparql_vars.get(v)).collect();
         let projection = SolutionSet::create("projection", nemo_vars);
@@ -109,13 +191,41 @@ impl QueryTranslator {
         Err(Todo("implement"))
     }
 
+    fn expression_known_to_be_bool(expr: &Expression) -> bool {
+        if let Expression::Literal(l) = expr {
+            if l.datatype() == spargebra::term::Literal::from(true).datatype() {
+                return true
+            }
+        }
+        match expr {
+            Expression::Equal(_, _) | Expression::SameTerm(_, _) |
+            Expression::Greater(_, _) | Expression::GreaterOrEqual(_, _) |
+            Expression::Less(_, _) | Expression::LessOrEqual(_, _) |
+            Expression::In(_, _) | Expression::Exists(_) |
+            Expression::Not(_) | Expression::Or(_, _) | Expression::And(_, _) |
+            Expression::FunctionCall(Function::IsBlank, _) |
+            Expression::FunctionCall(Function::IsNumeric, _) |
+            Expression::FunctionCall(Function::IsIri, _) |
+            Expression::FunctionCall(Function::IsLiteral, _) => true,
+            _ => false
+        }
+    }
+
     fn translate_pattern(&mut self, pattern: &GraphPattern) -> Result<SolutionSet, TranslateError> {
         match pattern {
             GraphPattern::Bgp {patterns} => self.translate_bgp(patterns),
             //path
             //join
             //left join
-            //filter
+            // positive exists filter
+            GraphPattern::Filter {expr, inner} => {
+                let inner_solution = self.translate_pattern(inner)?;
+                let mut expr_solution = self.translate_expression(expr, &inner_solution)?;
+                if !Self::expression_known_to_be_bool(expr) {
+                    expr_solution = self.translate_effective_boolean_value(&expr_solution)?
+                }
+                self.translate_filter(&expr_solution, &inner_solution)
+            }
             //union
             //extend
             //minus

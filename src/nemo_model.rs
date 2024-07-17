@@ -1075,6 +1075,17 @@ fn binding_parts<'a, 'b>(proto_bindings: &'a Vec<ProtoBinding>, vars: &'b Vec<Va
     )
 }
 
+fn variable_sets(proto_bindings: &Vec<ProtoBinding>) -> Vec<String>{
+    let mut result: Vec<String> = Vec::new();
+    for b in proto_bindings {
+        match b {
+            ProtoBinding::VariableSet(s) => result.push(s.clone()),
+            _ => {}
+        }
+    }
+    result
+}
+
 pub fn hash_dedup(vec: &Vec<VarPtr>) -> Vec<VarPtr>{
     let mut result = Vec::new();
     let mut done: HashSet<VarPtr> = HashSet::new();
@@ -1293,6 +1304,10 @@ impl RuleBuilder {
                         if let Some(var_set) = set_index.get(&predicates){
                             set_variables.entry(var_set.clone()).or_insert_with(Vec::new).push(var.clone());
                         }
+                    }
+                    // ensure also empty variable sets exist (var sets that don't exist raise error when resolving head)
+                    for var_set in variable_sets(bindings) {
+                        set_variables.entry(var_set).or_insert_with(Vec::new);
                     }
                     new_bindings.extend(end.iter().cloned());
                     new_body.push(ProtoPredicate::Explicit(predicate.clone(), new_bindings, *negated))
@@ -1783,7 +1798,7 @@ macro_rules! nemo_def {
 }
 
 macro_rules! nemo_add {
-    ($name:ident($($arg:expr),*) .) => {
+    ($name:ident($($arg:expr),*)) => {
         let bindings = vec![$(crate::nemo_model::Binding::from(&$arg)),*].iter().map(|binding|
             match binding {
                 crate::nemo_model::Binding::Constant(c) => c.clone(),
