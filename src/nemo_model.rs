@@ -242,6 +242,12 @@ impl From<&VarPtr> for Binding {
     }
 }
 
+impl From<VarPtr> for Binding {
+    fn from(value: VarPtr) -> Self {
+        Binding::Variable(value)
+    }
+}
+
 impl From<&&str> for Binding {
     fn from(value: &&str) -> Self {
         Binding::Constant(format!("\"{}\"", value))
@@ -340,7 +346,7 @@ binding_operator!(Sub, sub, "-");
 
 /// A predicate with bound positions
 #[derive(Debug)]
-struct BoundPredicate {
+pub struct BoundPredicate {
     /// The predicate to be used
     predicate: PredicatePtr,
     /// define bindings for some position of the predicate
@@ -350,7 +356,7 @@ struct BoundPredicate {
 }
 
 impl BoundPredicate {
-    fn new(predicate: PredicatePtr, bindings: Vec<Binding>, negated: bool) -> BoundPredicate {
+    pub(crate) fn new(predicate: PredicatePtr, bindings: Vec<Binding>, negated: bool) -> BoundPredicate {
         BoundPredicate{predicate, bindings, negated}
     }
 
@@ -367,13 +373,13 @@ impl BoundPredicate {
 
 /// for filter conditions
 #[derive(Debug)]
-struct SpecialPredicate {
+pub struct SpecialPredicate {
     bindings: Vec<(Binding, String)>,
     prefix: String
 }
 
 impl SpecialPredicate {
-    fn new(prefix: String, bindings: Vec<(Binding, String)>) -> SpecialPredicate {
+    pub fn new(prefix: String, bindings: Vec<(Binding, String)>) -> SpecialPredicate {
         SpecialPredicate {bindings, prefix}
     }
 
@@ -409,7 +415,7 @@ macro_rules! nemo_filter {
 /// A NEMO rule
 /// rules are always stored in [Predicate] instances
 #[derive(Debug)]
-struct Rule {
+pub struct Rule {
     /// bindings in predicate that has this rule as definition
     bindings: Vec<Binding>,
     /// rule body
@@ -419,7 +425,7 @@ struct Rule {
 }
 
 impl Rule {
-    fn new(bindings: Vec<Binding>, body: Vec<BoundPredicate>, filters: Vec<SpecialPredicate>) -> Rule{
+    pub fn new(bindings: Vec<Binding>, body: Vec<BoundPredicate>, filters: Vec<SpecialPredicate>) -> Rule{
         Rule{bindings, body, filters}
     }
 
@@ -1069,7 +1075,7 @@ fn binding_parts<'a, 'b>(proto_bindings: &'a Vec<ProtoBinding>, vars: &'b Vec<Va
     )
 }
 
-fn hash_dedup(vec: &Vec<VarPtr>) -> Vec<VarPtr>{
+pub fn hash_dedup(vec: &Vec<VarPtr>) -> Vec<VarPtr>{
     let mut result = Vec::new();
     let mut done: HashSet<VarPtr> = HashSet::new();
 

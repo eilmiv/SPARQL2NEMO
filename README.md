@@ -14,6 +14,8 @@ There are special suffixes for functions that do not produce solution sets:
 
 There are currently many known issues with the existing implementations. 
 
+You may also look at the example queries in [tests.rs](src/tests.rs).
+
 ## Usage
 There is currently no explicit UI. 
 The output NEMO program is currently printed to stdout and needs to be combined with the graph data and executed manually. 
@@ -30,10 +32,9 @@ Run the code using:
 cargo +nightly run
 ```
 
-You may need to install the following packages if you don't have them already:
+You may need to install the following packages if you don't have them already (Ubuntu):
 ```bash
 sudo apt update
 sudo apt install pkg-config
 sudo apt install libssl-dev
 ```
-

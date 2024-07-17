@@ -4,6 +4,10 @@ mod state;
 mod translation;
 mod solution;
 mod nemo_model;
+mod translation_next;
+
+#[cfg(test)]
+mod tests;
 
 use std::rc::Rc;
 use spargebra::algebra::GraphPattern;
@@ -92,12 +96,11 @@ fn _test_translation(){
     let query_str = "
         prefix ex: <https://example.com/>
 
-        SELECT ?a ?b ?c
+        SELECT DISTINCT ?a ?b ?c
         WHERE
         {
           ?a ?b ?c .
         }
-        order by (?a + ?b)
 
     ";
 
@@ -156,5 +159,5 @@ fn _test_model(){
 
 
 fn main() {
-    _test_model();
+    _test_translation();
 }
