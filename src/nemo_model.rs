@@ -335,6 +335,14 @@ macro_rules! binding_operator {
                 Binding::Operation(Operation::new($op, self, Binding::from(rhs)))
             }
         }
+
+        impl ops::$class_name<Binding> for usize {
+            type Output = Binding;
+
+            fn $func_name(self, rhs: Binding) -> Self::Output {
+                Binding::Operation(Operation::new($op, Binding::from(self), rhs))
+            }
+        }
     };
 }
 

@@ -375,12 +375,17 @@ fn operators() -> Result<(), Error> {
         "
             prefix ex: <https://example.com/>
 
-            SELECT DISTINCT ?pos ?a
+            SELECT DISTINCT ?pos ?a ?s ?m ?d ?ua ?us
             WHERE
             {
                 ?pos ex:p ?x .
                 ?pos ex:q ?y .
                 BIND(?x + ?y as ?a)
+                BIND(?x - ?y as ?s)
+                BIND(?x * ?y as ?m)
+                BIND(?x / ?y as ?d)
+                BIND(+?x as ?ua)
+                BIND(-?x as ?us)
             }
         ",
         "
@@ -392,11 +397,14 @@ fn operators() -> Result<(), Error> {
             input_graph(2, ex:q, 1) .
             input_graph(3, ex:p, 2) .
             input_graph(3, ex:q, 1) .
+            input_graph(4, ex:p, 4) .
+            input_graph(4, ex:q, 2) .
         ",
         "
-            1, 1
-            2, 2
-            3, 3
+            1, 1, -1, 0, 0, 0,  0
+            2, 2,  0, 1, 1, 1, -1
+            3, 3,  1, 2, 2, 2, -2
+            4, 6,  2, 8, 2, 4, -4
         "
     )
 }
@@ -422,6 +430,86 @@ fn in_expression() -> Result<(), Error> {
             input_graph(3, ex:p, 7) .
          ",
         "1; 3"
+    )
+}
+
+
+#[test]
+fn exists() -> Result<(), Error> {
+    let sparql = "
+        prefix ex: <https://example.com/>
+
+        SELECT DISTINCT ?x
+        WHERE
+        {
+            ?a ex:p ?x .
+            FILTER EXISTS {?x ex:q ex:o1 .}
+        }
+    ";
+    assert_sparql(
+        sparql,
+        "
+            @prefix ex: <https://example.com/> .
+
+            input_graph(1, ex:p, 2) .
+            input_graph(1, ex:p, 3) .
+            input_graph(2, ex:q, ex:o2) .
+            input_graph(3, ex:q, ex:o1) .
+         ",
+        "3"
+    )?;
+    assert!(!translate(sparql).expect("translation error").contains("~"), "positive filter should not contain negation");
+    Ok(())
+}
+
+#[test]
+fn not_exists() -> Result<(), Error> {
+    let sparql = "
+        prefix ex: <https://example.com/>
+
+        SELECT DISTINCT ?x
+        WHERE
+        {
+            ?a ex:p ?x .
+            FILTER NOT EXISTS {?x ex:q ex:o1 .}
+        }
+    ";
+    assert_sparql(
+        sparql,
+        "
+            @prefix ex: <https://example.com/> .
+
+            input_graph(1, ex:p, 2) .
+            input_graph(1, ex:p, 3) .
+            input_graph(2, ex:q, ex:o2) .
+            input_graph(3, ex:q, ex:o1) .
+         ",
+        "2"
+    )?;
+    assert!(translate(sparql).expect("translation error").contains("~"), "negative filter should contain negation using '~', exists test expects this");
+    Ok(())
+}
+
+#[test]
+fn if_expression() -> Result<(), Error> {
+    assert_sparql(
+        "
+            prefix ex: <https://example.com/>
+
+            SELECT DISTINCT ?x ?y
+            WHERE
+            {
+                ?a ex:p ?x .
+                BIND(IF(?x, \"yay\", ?a) as ?y)
+            }
+        ",
+        "
+            @prefix ex: <https://example.com/> .
+
+            input_graph(1, ex:p, 0) .
+            input_graph(2, ex:p, 3) .
+         ",
+        "0, 1; 3, \"yay\""
     )
 }
 
@@ -459,7 +547,7 @@ fn bind_with_expression_error() -> Result<(), Error> {
             WHERE
             {
                 ?a ex:p ?x .
-                BIND(?x + 1 as ?y)
+                BIND(+?x as ?y)
             }
         ",
         "
@@ -468,6 +556,6 @@ fn bind_with_expression_error() -> Result<(), Error> {
             input_graph(1, ex:p, 5) .
             input_graph(2, ex:p, ex:nan) .
          ",
-        "1, 6; 2, _:0"
+        "1, 5; 2, _:0"
     )
 }

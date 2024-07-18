@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fmt::Debug;
 use spargebra::algebra::{Expression, Function, GraphPattern};
 use spargebra::Query;
 use spargebra::term::{BlankNode, Literal, NamedNode, NamedNodePattern, TermPattern, TriplePattern, Variable};
@@ -169,6 +170,52 @@ impl QueryTranslator {
         Ok(in_expression)
     }
 
+    fn translate_binary_operator(&mut self, l: Binding, r: Binding, result: Binding, left_solution: &SolutionExpression, right_solution: &SolutionExpression, binding: &dyn TypedPredicate) -> Result<SolutionExpression, TranslateError>{
+        nemo_def!(
+            op(??vars, ??left, ??right; @result: result) :-
+                binding(??var, ??left, ??right, ??other),
+                left_solution(??vars, ??left; @result: l),
+                right_solution(??vars, ??right; @result: r)
+                ; SolutionExpression
+        );
+        Ok(op)
+    }
+
+    fn translate_positive_exists(&mut self, pattern_solution: &SolutionSet, binding: &dyn TypedPredicate) -> Result<SolutionExpression, TranslateError> {
+        nemo_def!(partial_exists(??intersection; @result: true) :- pattern_solution(??intersection, ??pattern_only), binding(??intersection, ??other); SolutionExpression);
+        Ok(partial_exists)
+    }
+
+    fn translate_exists(&mut self, pattern_solution: &SolutionSet, binding: &dyn TypedPredicate) -> Result<SolutionExpression, TranslateError> {
+        let partial_exists = self.translate_positive_exists(pattern_solution, binding)?;
+        nemo_def!(exists(??vars; @result: true) :- partial_exists(??vars; @result: true); SolutionExpression);
+        nemo_add!(exists(??vars; @result: false) :- binding(??vars, ??other), ~partial_exists(??vars; @result: true));
+        Ok(exists)
+    }
+
+    fn translate_if(&mut self, condition: &SolutionExpression, true_val: &SolutionExpression, false_val: &SolutionExpression, binding: &dyn TypedPredicate) -> Result<SolutionExpression, TranslateError> {
+        let vars: Vec<VarPtr> = condition.depend_vars().into_iter()
+            .chain(true_val.depend_vars().into_iter())
+            .chain(false_val.depend_vars().into_iter())
+            .chain(vec![VarPtr::new("result")])
+            .collect();
+
+        let if_expression = SolutionExpression::create("if_expression", hash_dedup(&vars));
+        nemo_add!(
+            if_expression(??all, ??cond, ??val, ??extra; @result: ?v) :-
+                binding(??all, ??cond, ??val, ??extra, ??other),
+                condition(??all, ??cond; @result: true),
+                true_val(??all, ??val; @result: ?v)
+        );
+        nemo_add!(
+            if_expression(??all, ??cond, ??val, ??extra; @result: ?v) :-
+                binding(??all, ??cond, ??val, ??extra, ??other),
+                condition(??all, ??cond; @result: false),
+                false_val(??all, ??val; @result: ?v)
+        );
+        Ok(if_expression)
+    }
+
     fn translate_effective_boolean_value(&mut self, expression: &SolutionExpression) -> Result<SolutionExpression, TranslateError> {
         // bools
         nemo_def!(effective_boolean_value(??vars; @result: false) :- expression(??vars; @result: ?v), {nemo_filter!("", ?v, " = ", false, "")}; SolutionExpression);
@@ -209,6 +256,10 @@ impl QueryTranslator {
         let mut result = self.translate_expression(expression, binding)?;
         if !Self::expression_known_to_be_bool(expression) {result = self.translate_effective_boolean_value(&result)?}
         Ok(result)
+    }
+
+    fn translate_function(&mut self, func: &Function, params: &Vec<Expression>, binding: &dyn TypedPredicate) -> Result<SolutionExpression, TranslateError> {
+        panic!("todo")
     }
 
     fn translate_expression(&mut self, expression: &Expression, binding: &dyn TypedPredicate) -> Result<SolutionExpression, TranslateError> {
@@ -294,23 +345,52 @@ impl QueryTranslator {
                 let right_solution = self.translate_expression(right, binding)?;
                 let l = nemo_var!(l);
                 let r = nemo_var!(r);
-                nemo_def!(
-                    add(??vars, ??left, ??right; @result: l.clone() + r.clone()) :-
-                        binding(??var, ??left, ??right, ??other),
-                        left_solution(??vars, ??left; @result: l),
-                        right_solution(??vars, ??right; @result: r)
-                        ; SolutionExpression
-                );
-                Ok(add)
+                self.translate_binary_operator(l.clone(), r.clone(), l + r, &left_solution, &right_solution, binding)
             }
-            // subtract
-            // multiply
-            // divide
-            // unary plus
-            // unary minus
-            // exists
-            // if
-            // function call
+            Expression::Subtract(left, right) => {
+                let left_solution = self.translate_expression(left, binding)?;
+                let right_solution = self.translate_expression(right, binding)?;
+                let l = nemo_var!(l);
+                let r = nemo_var!(r);
+                self.translate_binary_operator(l.clone(), r.clone(), l - r, &left_solution, &right_solution, binding)
+            }
+            Expression::Multiply(left, right) => {
+                let left_solution = self.translate_expression(left, binding)?;
+                let right_solution = self.translate_expression(right, binding)?;
+                let l = nemo_var!(l);
+                let r = nemo_var!(r);
+                self.translate_binary_operator(l.clone(), r.clone(), l * r, &left_solution, &right_solution, binding)
+            }
+            Expression::Divide(left, right) => {
+                let left_solution = self.translate_expression(left, binding)?;
+                let right_solution = self.translate_expression(right, binding)?;
+                let l = nemo_var!(l);
+                let r = nemo_var!(r);
+                self.translate_binary_operator(l.clone(), r.clone(), l / r, &left_solution, &right_solution, binding)
+            }
+            Expression::UnaryPlus(inner) => {
+                let inner_solution = self.translate_expression(inner, binding)?;
+                let r = nemo_var!(r);
+                nemo_def!(unary_plus(??vars; @result: 0 + r.clone()) :- binding(??vars, ??other), inner_solution(??vars; @result: r); SolutionExpression);
+                Ok(unary_plus)
+            }
+            Expression::UnaryMinus(inner) => {
+                let inner_solution = self.translate_expression(inner, binding)?;
+                let r = nemo_var!(r);
+                nemo_def!(unary_minus(??vars; @result: 0 - r.clone()) :- binding(??vars, ??other), inner_solution(??vars; @result: r); SolutionExpression);
+                Ok(unary_minus)
+            }
+            Expression::Exists(pattern) => {
+                let pattern_solution = self.translate_pattern(pattern)?;
+                self.translate_exists(&pattern_solution, binding)
+            }
+            Expression::If(cond, true_val, false_val) => {
+                let cond_solution = self.translate_bool_expression(cond, binding)?;
+                let true_solution = self.translate_expression(true_val, binding)?;
+                let false_solution = self.translate_expression(false_val, binding)?;
+                self.translate_if(&cond_solution, &true_solution, &false_solution, binding)
+            }
+            Expression::FunctionCall(func, params) => {Err(Todo("implement function call"))}
             _ => Err(ExpressionNotImplemented(expression.clone()))
         }
     }
@@ -389,8 +469,14 @@ impl QueryTranslator {
             GraphPattern::Bgp {patterns} => self.translate_bgp(patterns),
             //path
             //join
+            //positive exists left join
             //left join
-            // positive exists filter
+            GraphPattern::Filter {expr: Expression::Exists(pattern), inner} => {
+                let inner_solution = self.translate_pattern(inner)?;
+                let exists_solution = self.translate_pattern(pattern)?;
+                let expr_solution = self.translate_positive_exists(&exists_solution, &inner_solution)?;
+                self.translate_filter(&expr_solution, &inner_solution)
+            },
             GraphPattern::Filter {expr, inner} => {
                 let inner_solution = self.translate_pattern(inner)?;
                 let expr_solution = self.translate_bool_expression(expr, &inner_solution)?;
