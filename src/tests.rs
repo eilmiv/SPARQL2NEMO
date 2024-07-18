@@ -273,3 +273,201 @@ fn and() -> Result<(), Error> {
         "4"
     )
 }
+
+#[test]
+fn not() -> Result<(), Error> {
+    assert_sparql(
+        "
+            prefix ex: <https://example.com/>
+
+            SELECT DISTINCT ?a
+            WHERE
+            {
+                ?a ex:p ?x .
+                ?a ex:q ?y .
+                FILTER(?x && !?y)
+            }
+        ",
+        "
+            @prefix ex: <https://example.com/> .
+
+            input_graph(1, ex:p, 0) .
+            input_graph(1, ex:q, 0) .
+            input_graph(2, ex:p, 1) .
+            input_graph(2, ex:q, 0) .
+            input_graph(3, ex:p, 0) .
+            input_graph(3, ex:q, 1) .
+            input_graph(4, ex:p, 1) .
+            input_graph(4, ex:q, 1) .
+         ",
+        "2"
+    )
+}
+
+#[test]
+fn same_term() -> Result<(), Error> {
+    assert_sparql(
+        "
+            prefix ex: <https://example.com/>
+
+            SELECT DISTINCT ?a
+            WHERE
+            {
+                ?a ex:p ?x .
+                ?a ex:q ?y .
+                FILTER(sameTerm(?x, ?y))
+            }
+        ",
+        "
+            @prefix ex: <https://example.com/> .
+
+            input_graph(1, ex:p, \"a\") .
+            input_graph(1, ex:q, \"a\"@en) .
+            input_graph(2, ex:p, \"a\") .
+            input_graph(2, ex:q, \"a\") .
+         ",
+        "2"
+    )
+}
+
+#[test]
+fn comparisons() -> Result<(), Error> {
+    let t = "\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>";
+    let f = "\"false\"^^<http://www.w3.org/2001/XMLSchema#boolean>";
+    assert_sparql(
+        "
+            prefix ex: <https://example.com/>
+
+            SELECT DISTINCT ?a ?g ?ge ?s ?se ?e ?ne
+            WHERE
+            {
+                ?a ex:p ?x .
+                ?a ex:q ?y .
+                BIND(?x > ?y as ?g)
+                BIND(?x >= ?y as ?ge)
+                BIND(?x < ?y as ?s)
+                BIND(?x <= ?y as ?se)
+                BIND(?x = ?y as ?e)
+                BIND(?x != ?y as ?ne)
+            }
+        ",
+        "
+            @prefix ex: <https://example.com/> .
+
+            input_graph(1, ex:p, 0) .
+            input_graph(1, ex:q, 1) .
+            input_graph(2, ex:p, 1) .
+            input_graph(2, ex:q, 1) .
+            input_graph(3, ex:p, 2) .
+            input_graph(3, ex:q, 1) .
+         ",
+        &vec![
+            vec!["1", f, f, t, t, f, t].join(", "),
+            vec!["2", f, t, f, t, t, f].join(", "),
+            vec!["3", t, t, f, f, f, t].join(", "),
+        ].join("; ")
+    )
+}
+
+#[test]
+fn operators() -> Result<(), Error> {
+    assert_sparql(
+        "
+            prefix ex: <https://example.com/>
+
+            SELECT DISTINCT ?pos ?a
+            WHERE
+            {
+                ?pos ex:p ?x .
+                ?pos ex:q ?y .
+                BIND(?x + ?y as ?a)
+            }
+        ",
+        "
+            @prefix ex: <https://example.com/> .
+
+            input_graph(1, ex:p, 0) .
+            input_graph(1, ex:q, 1) .
+            input_graph(2, ex:p, 1) .
+            input_graph(2, ex:q, 1) .
+            input_graph(3, ex:p, 2) .
+            input_graph(3, ex:q, 1) .
+        ",
+        "
+            1, 1
+            2, 2
+            3, 3
+        "
+    )
+}
+
+#[test]
+fn in_expression() -> Result<(), Error> {
+    assert_sparql(
+        "
+            prefix ex: <https://example.com/>
+
+            SELECT DISTINCT ?a
+            WHERE
+            {
+                ?a ex:p ?x .
+                FILTER(?x in (5, 7))
+            }
+        ",
+        "
+            @prefix ex: <https://example.com/> .
+
+            input_graph(1, ex:p, 5) .
+            input_graph(2, ex:p, 6) .
+            input_graph(3, ex:p, 7) .
+         ",
+        "1; 3"
+    )
+}
+
+#[test]
+fn bind() -> Result<(), Error> {
+    assert_sparql(
+        "
+            prefix ex: <https://example.com/>
+
+            SELECT DISTINCT ?a ?y
+            WHERE
+            {
+                ?a ex:p ?x .
+                BIND(?x as ?y)
+            }
+        ",
+        "
+            @prefix ex: <https://example.com/> .
+
+            input_graph(1, ex:p, 5) .
+            input_graph(2, ex:p, 6) .
+         ",
+        "1, 5; 2, 6"
+    )
+}
+
+#[test]
+fn bind_with_expression_error() -> Result<(), Error> {
+    // this is not correct sparql behaviour yet
+    assert_sparql(
+        "
+            prefix ex: <https://example.com/>
+
+            SELECT DISTINCT ?a ?y
+            WHERE
+            {
+                ?a ex:p ?x .
+                BIND(?x + 1 as ?y)
+            }
+        ",
+        "
+            @prefix ex: <https://example.com/> .
+
+            input_graph(1, ex:p, 5) .
+            input_graph(2, ex:p, ex:nan) .
+         ",
+        "1, 6; 2, _:0"
+    )
+}

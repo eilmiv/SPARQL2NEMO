@@ -38,3 +38,6 @@ sudo apt update
 sudo apt install pkg-config
 sudo apt install libssl-dev
 ```
+
+Tests need to be run with `RUST_TEST_THREADS=1` environment variable because Nemo uses timing locks where it is unknown 
+how multithreading is supported with this.

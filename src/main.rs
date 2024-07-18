@@ -100,8 +100,8 @@ fn _test_translation(){
         WHERE
         {
           ?a ?b ?c .
+          BIND(?c in (1, 2, 3) as ?d)
         }
-
     ";
 
     println!("translating query:");

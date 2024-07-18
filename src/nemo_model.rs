@@ -761,6 +761,14 @@ pub fn add_rule(p: &dyn TypedPredicate, rule: Rule){
     p.get_predicate().add_rule(rule)
 }
 
+pub fn get_vars(p: &dyn TypedPredicate) -> Vec<VarPtr>{
+    p.get_predicate().vars()
+}
+
+pub fn to_bound_predicate(p: &dyn TypedPredicate) -> BoundPredicate {
+    BoundPredicate::new(p.get_predicate(), get_vars(p).iter().map(Binding::from).collect(), false)
+}
+
 pub fn construct_program(p: &dyn TypedPredicate) -> String {
     let mut state = GenState::new();
     let output_rule = p.get_predicate().construct_program(&mut state);
@@ -1294,7 +1302,41 @@ impl RuleBuilder {
                         let predicates = *var_predicates.get(var).expect("predicates for var not computed.");
                         let matched = set_index.get(&predicates).is_some();
                         let allow_unmatched = predicates_with_rename_set.contains(predicate);
-                        if !(matched || allow_unmatched) {panic!("var {var} in {} could not be bound to any var set", predicate.label())}
+                        if !(matched || allow_unmatched) {
+                            // construct error message
+                            let flags = *var_predicates.get(var).unwrap();
+                            let mut predicates: Vec<String> = Vec::new();
+                            if flags & 1 > 0 {predicates.push("RULE_HEAD".to_string())}
+                            for (i, proto_predicate) in self.body.iter().enumerate() {
+                                let flag: u64 = { 2u64 }.pow((i + 1) as u32);
+                                if flag & flags > 0 {
+                                    match proto_predicate {
+                                        ProtoPredicate::Explicit(p, bindings, _) => predicates.push(
+                                            format!(
+                                                "{}({})",
+                                                p.label(),
+                                                bindings.iter().map(
+                                                    |b| match b {
+                                                        ProtoBinding::VariableSet(s) => s.clone(),
+                                                        ProtoBinding::Binding(b) => "binding".to_string(),
+                                                        ProtoBinding::RenameSet(r) => "rename_set".to_string(),
+                                                        ProtoBinding::Aggregate(a, b) => "aggregation".to_string(),
+                                                        ProtoBinding::NamedConnection(s) => s.clone()
+                                                    }
+                                                ).collect::<Vec<_>>().join(", ")
+                                            )
+                                        ),
+                                        _ => predicates.push("IMPLICIT".to_string()),
+                                    };
+                                }
+                            }
+
+                            let mut available = String::new();
+                            for (key, value) in set_index.iter() {
+                                available.push_str(&format!("{}: {:#b}\n", value, key));
+                            }
+                            panic!("var {var} in {} could not be bound to any var set; predicates: {} \nflags: {:#b} \navailable: \n{}\n", predicate.label(), predicates.join(", "), flags, available)
+                        }
                         if matched {
                             new_bindings.push(ProtoBinding::Binding(Binding::Variable(var.clone())))
                         }
