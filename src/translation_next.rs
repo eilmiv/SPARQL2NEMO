@@ -258,8 +258,109 @@ impl QueryTranslator {
         Ok(result)
     }
 
-    fn translate_function(&mut self, func: &Function, params: &Vec<Expression>, binding: &dyn TypedPredicate) -> Result<SolutionExpression, TranslateError> {
-        panic!("todo")
+    fn function(&mut self, expressions: &Vec<SolutionExpression>, binding: &dyn TypedPredicate, func: &str) -> Result<SolutionExpression, TranslateError> {
+        let call = Call::new(func, expressions.iter().map(|e| e.result_var()).map(Binding::from).collect());
+        let vars: Vec<VarPtr> = hash_dedup(&expressions.iter().flat_map(|e| e.depend_vars()).collect());
+        let solution_vars: Vec<VarPtr> = vars.iter().map(|v| v.clone()).chain(vec![VarPtr::new("result")]).collect();
+        let head_bindings: Vec<Binding> = vars.iter().map(Binding::from).chain(vec![Binding::from(call)]).collect();
+        let solution = SolutionExpression::create(&func.to_lowercase(), solution_vars);
+        add_rule(&solution,
+                 Rule::new(
+                     head_bindings,
+                     expressions.iter().map(|e| to_bound_predicate(e)).chain(vec![to_bound_predicate(binding)]).collect(),
+                     vec![]
+                 )
+        );
+        Ok(solution)
+    }
+
+    fn translate_function(&mut self, func: &Function, parameter_expressions: &Vec<Expression>, binding: &dyn TypedPredicate) -> Result<SolutionExpression, TranslateError> {
+        let params = parameter_expressions.iter().map(|e| self.translate_expression(e, binding)).collect::<Result<Vec<_>, _>>()?;
+        match func {
+            Function::Str => self.function(&params, binding, "STR"),
+            Function::Lang => self.function(&params, binding, "LANG"),
+            // LangMatches -> language tag matches a lang range e.g. en-US, de-*
+            Function::Datatype => self.function(&params, binding, "DATATYPE"),
+            // Iri
+            // BNode
+            // Rand
+            Function::Abs => self.function(&params, binding, "ABS"),
+            Function::Ceil => self.function(&params, binding, "CEIL"),
+            Function::Floor => self.function(&params, binding, "FLOOR"),
+            Function::Round => self.function(&params, binding, "ROUND"),
+            Function::Concat => self.function(&params, binding, "CONCAT"),
+            Function::SubStr => self.function(&params, binding, match params.len() {
+                2 => "SUBSTR",
+                3 => "SUBSTRING",
+                _ => Err(TranslateError::InvalidNumberOfArguments(func.clone(), parameter_expressions.clone()))?
+            }),
+            Function::StrLen => self.function(&params, binding, "STRLEN"),
+            // Replace -> supports regex
+            Function::UCase => self.function(&params, binding, "UCASE"),
+            Function::LCase => self.function(&params, binding, "LCASE"),
+            // EncodeForUri
+            Function::Contains => self.function(&params, binding, "CONTAINS"),
+            Function::StrStarts => self.function(&params, binding, "STRSTARTS"),
+            Function::StrEnds => self.function(&params, binding, "STRENDS"),
+            Function::StrBefore => self.function(&params, binding, "STRBEFORE"),
+            Function::StrAfter => self.function(&params, binding, "STRAFTER"),
+            // Year
+            // Month
+            // Day
+            // Hours
+            // Minutes
+            // Seconds
+            // Timezone -> timezone as dayTimeDuration
+            // Tz -> timezone as simple literal
+            // Now
+            // Uuid
+            // StrUuid
+            // Md5
+            // Sha1
+            // Sha256
+            // Sha384
+            // Sha512
+            // StrLang -> constructs lang string
+            // StrDt -> constructs literal with datatype
+            Function::IsIri => self.function(&params, binding, "isIri"),
+            Function::IsBlank => self.function(&params, binding, "isNull"),
+            Function::IsLiteral => {
+                let is_iri = self.function(&params, binding, "isIri")?;
+                let is_blank = self.function(&params, binding, "isNull")?;
+                let either = self.function(&vec![is_iri, is_blank], binding, "OR")?;
+                self.function(&vec![either], binding, "NOT")
+            }
+            Function::IsNumeric => self.function(&params, binding, "isNumeric"),
+            Function::Regex => self.function(&params, binding, "REGEX"),
+            // Triple
+            // Subject
+            // Predicate
+            // Object
+            // IsTriple
+            // Adjust -> no clue what this is
+            Function::Custom(func_iri) => {
+                match func_iri.as_str() {
+                    "http://www.w3.org/2005/xpath-functions/math#sqrt" => self.function(&params, binding, "SQRT"),
+                    "http://www.w3.org/2005/xpath-functions/math#sin" => self.function(&params, binding, "SIN"),
+                    "http://www.w3.org/2005/xpath-functions/math#cos" => self.function(&params, binding, "COS"),
+                    "http://www.w3.org/2005/xpath-functions/math#tan" => self.function(&params, binding, "TAN"),
+                    // round
+                    // "http://www.w3.org/2005/xpath-functions/math#log" => self.function(&params, binding, "LOG"), // no IRI for log x base y known
+                    "http://www.w3.org/2005/xpath-functions/math#pow" => self.function(&params, binding, "POW"),
+                    // rem
+                    "https://www.w3.org/2005/xpath-functions#sum" => self.function(&params, binding, "SUM"),
+                    // prod
+                    "https://www.w3.org/2005/xpath-functions#min" => self.function(&params, binding, "MIN"),
+                    "https://www.w3.org/2005/xpath-functions#max" => self.function(&params, binding, "MAX"),
+                    // luka
+                    // bitand
+                    // bitor
+                    // bitxor
+                    _ => Err(TranslateError::FunctionNotImplemented(func.clone()))
+                }
+            }
+            _ => Err(TranslateError::FunctionNotImplemented(func.clone()))
+        }
     }
 
     fn translate_expression(&mut self, expression: &Expression, binding: &dyn TypedPredicate) -> Result<SolutionExpression, TranslateError> {
@@ -384,13 +485,15 @@ impl QueryTranslator {
                 let pattern_solution = self.translate_pattern(pattern)?;
                 self.translate_exists(&pattern_solution, binding)
             }
+            // bound
             Expression::If(cond, true_val, false_val) => {
                 let cond_solution = self.translate_bool_expression(cond, binding)?;
                 let true_solution = self.translate_expression(true_val, binding)?;
                 let false_solution = self.translate_expression(false_val, binding)?;
                 self.translate_if(&cond_solution, &true_solution, &false_solution, binding)
             }
-            Expression::FunctionCall(func, params) => {Err(Todo("implement function call"))}
+            // coalesce
+            Expression::FunctionCall(func, params) => self.translate_function(func, params, binding),
             _ => Err(ExpressionNotImplemented(expression.clone()))
         }
     }
