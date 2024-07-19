@@ -96,11 +96,11 @@ fn _test_translation(){
     let query_str = "
         prefix ex: <https://example.com/>
 
-        SELECT DISTINCT ?a ?b ?c
+        SELECT DISTINCT ?a ?b ?d
         WHERE
         {
           ?a ?b ?c .
-          BIND(ex:hi(?c) as ?d)
+          BIND(?c in (1, 2, 3) as ?d)
         }
     ";
 
