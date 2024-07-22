@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fmt::Debug;
-use spargebra::algebra::{Expression, Function, GraphPattern};
+use spargebra::algebra::{Expression, Function, GraphPattern, PropertyPathExpression};
 use spargebra::Query;
 use spargebra::term::{BlankNode, Literal, NamedNode, NamedNodePattern, TermPattern, TriplePattern, Variable};
 use crate::error::TranslateError;
@@ -21,6 +21,12 @@ impl SolutionExpression {
     fn result_var(&self) -> VarPtr {
         let vars = self.get_predicate().vars();
         vars.last().expect("expression needs to have result").clone()
+    }
+}
+
+impl SolutionSet {
+    fn from_predicate(p: &PredicatePtr) -> SolutionSet {
+        SolutionSet{inner: p.clone()}
     }
 }
 
@@ -69,6 +75,10 @@ struct QueryTranslator {
 impl QueryTranslator {
     fn new(input_graph: PredicatePtr) -> QueryTranslator {
         QueryTranslator{sparql_vars: VariableTranslator::new(), input_graph}
+    }
+
+    fn triple_set(&self) -> SolutionSet {
+        SolutionSet::from_predicate(&self.input_graph)
     }
 
     fn translate_expression_variable(&mut self, var: &Variable, binding: &dyn TypedPredicate) -> Result<SolutionExpression, TranslateError> {
@@ -498,9 +508,11 @@ impl QueryTranslator {
         }
     }
 
+
     fn translate_term(&mut self, term: &TermPattern, variables: &mut Vec<VarPtr>, bnode_vars: &mut Vec<VarPtr>) -> Result<Binding, TranslateError> {
         Ok(match term {
             TermPattern::NamedNode(node) => Binding::from(node),
+            TermPattern::Literal(node) => Binding::from(node),
             TermPattern::BlankNode(node) => {
                 let var = self.sparql_vars.bnode(node);
                 bnode_vars.push(var.clone());
@@ -544,6 +556,114 @@ impl QueryTranslator {
         Ok(result)
     }
 
+    fn is_constant(b: &Binding) -> bool {
+        match b {
+            Binding::Constant(c) => true,
+            Binding::Variable(v) => false,
+            _ => panic!("this function should only be called with variables or constants")
+        }
+    }
+
+    fn translate_one_or_more_path(&mut self, start: Binding, path: &SolutionSet, end: Binding) -> SolutionSet {
+        let reverse_iterate = Self::is_constant(&end) && !Self::is_constant(&start);
+        let mid = nemo_var!(mid);
+        if reverse_iterate {
+            nemo_def!(reverse_recursive(?next, end) :- path(?next, end); SolutionSet);
+            nemo_add!(reverse_recursive(?next, end) :- path(?next, mid), reverse_recursive(mid, end));
+            nemo_def!(one_or_more_path(start, end) :- reverse_recursive(start, end); SolutionSet);
+            one_or_more_path
+        }
+        else {
+            nemo_def!(recursive(start, ?next) :- path(start, ?next); SolutionSet);
+            nemo_add!(recursive(start, ?next) :- recursive(start, mid), path(mid, ?next));
+            nemo_def!(one_or_more_path(start, end) :- recursive(start, end); SolutionSet);
+            one_or_more_path
+        }
+    }
+
+    fn zero_path_extend(&mut self, start: Binding, path: SolutionSet, end: Binding) -> SolutionSet {
+        // start and end are different constants -> there is no zero path
+        if Self::is_constant(&start) && Self::is_constant(&end) && &start != &end { return path }
+        //if let Binding::Constant(c1) = start { if let Binding::Constant(c2) = end { if c1 != c2 { return path } } }
+
+        let start_constant = if Self::is_constant(&start) {Some(start)} else {None};
+        let end_constant = if Self::is_constant(&end) {Some(end)} else {None};
+        let constant = start_constant.or(end_constant);
+
+        if let Some(c) = constant {
+            // one term (the other one is a variable) or two terms (start and end are the same)
+            nemo_add!(path(c, c));
+            path
+        }
+        else {
+            // no constants
+            let input_graph = self.triple_set();
+            nemo_add!(path(?s, ?s) :- input_graph(?s, ?p, ?o));
+            nemo_add!(path(?o, ?o) :- input_graph(?s, ?p, ?o));
+            path
+        }
+    }
+
+    fn translate_negated_property_set(&mut self, start: Binding, properties: &Vec<NamedNode>, end: Binding) -> SolutionSet {
+        let property_var = nemo_var!(property_var);
+        let filters = properties.iter().enumerate().flat_map(
+            |(i, p)| [
+                (property_var.clone(), " != ".to_string()),
+                (Binding::from(p), if i == properties.len() - 1 {"".to_string()} else {", ".to_string()})
+            ]
+        ).collect();
+        let filter = SpecialPredicate::new("".to_string(), filters);
+        let graph = self.triple_set();
+        nemo_def!(negated_property_set(start, end) :- graph(start, property_var, end), {filter}; SolutionSet);
+        negated_property_set
+    }
+
+    fn translate_path(&mut self, start: Binding, path: &PropertyPathExpression, end: Binding) -> Result<SolutionSet, TranslateError> {
+        match path {
+            PropertyPathExpression::NamedNode(property) => {
+                let input_graph = self.triple_set();
+                nemo_def!(path_property(start, end) :- input_graph(start, property.clone(), end); SolutionSet);
+                Ok(path_property)
+            },
+            PropertyPathExpression::Reverse(p) => {
+                let inner = self.translate_path(end.clone(), p, start.clone())?;
+                nemo_def!(path_reverse(start, end) :- inner(end, start); SolutionSet);
+                Ok(path_reverse)
+            }
+            PropertyPathExpression::Sequence(first_path, second_path) => {
+                let middle = nemo_var!(path_middle);
+                let first = self.translate_path(start.clone(), first_path, middle.clone())?;
+                let second = self.translate_path(middle.clone(), second_path, end.clone())?;
+                nemo_def!(path_sequence(start, end) :- first(start, middle), second(middle, end); SolutionSet);
+                Ok(path_sequence)
+            }
+            PropertyPathExpression::Alternative(first_path, second_path) => {
+                let first = self.translate_path(start.clone(), first_path, end.clone())?;
+                let second = self.translate_path(start.clone(), second_path, end.clone())?;
+                nemo_def!(path_alternative(start, end) :- first(start, end); SolutionSet);
+                nemo_add!(path_alternative(start, end) :- second(start, end));
+                Ok(path_alternative)
+            }
+            PropertyPathExpression::OneOrMore(p) => {
+                let inner = self.translate_path(nemo_var!(start), p, nemo_var!(end))?;
+                Ok(self.translate_one_or_more_path(start, &inner, end))
+            }
+            PropertyPathExpression::ZeroOrMore(p) => {
+                let inner = self.translate_path(nemo_var!(start), p, nemo_var!(end))?;
+                let one_or_more = self.translate_one_or_more_path(start.clone(), &inner, end.clone());
+                Ok(self.zero_path_extend(start, one_or_more, end))
+            }
+            PropertyPathExpression::ZeroOrOne(p) => {
+                let inner = self.translate_path(start.clone(), p, end.clone())?;
+                Ok(self.zero_path_extend(start, inner, end))
+            }
+            PropertyPathExpression::NegatedPropertySet(properties) => {
+                Ok(self.translate_negated_property_set(start, properties, end))
+            }
+            _ => Err(TranslateError::PathNotImplemented(path.clone()))
+        }
+    }
+
     fn translate_filter(&mut self, expression: &SolutionExpression, inner: &SolutionSet) -> Result<SolutionSet, TranslateError> {
         nemo_def!(filter(??expr_vars, ??other_vars) :- inner(??expr_vars, ??other_vars), expression(??expr_vars; @result: true); SolutionSet);
         Ok(filter)
@@ -570,7 +690,11 @@ impl QueryTranslator {
     fn translate_pattern(&mut self, pattern: &GraphPattern) -> Result<SolutionSet, TranslateError> {
         match pattern {
             GraphPattern::Bgp {patterns} => self.translate_bgp(patterns),
-            //path
+            GraphPattern::Path{subject, path, object} => {
+                let start = self.translate_term(subject, &mut vec![], &mut vec![])?;
+                let end = self.translate_term(object, &mut vec![], &mut vec![])?;
+                self.translate_path(start, path, end)
+            },
             //join
             //positive exists left join
             //left join

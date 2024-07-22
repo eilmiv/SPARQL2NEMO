@@ -168,6 +168,333 @@ fn bgp() -> Result<(), Error> {
 }
 
 #[test]
+fn path_alternative() -> Result<(), Error> {
+    /// also tests named node and reverse
+    assert_sparql(
+        "
+            prefix ex: <https://example.com/>
+
+            SELECT DISTINCT ?a ?b
+            WHERE
+            {
+                ?a ex:p|^ex:q ?b .
+            }
+        ",
+        "
+            @prefix ex: <https://example.com/> .
+
+            input_graph(1, ex:p, 100) .
+            input_graph(2, ex:x, 200) .
+            input_graph(3, ex:q, 300) .
+         ",
+        "1, 100; 300, 3"
+    )
+}
+
+#[test]
+fn path_one_or_more() -> Result<(), Error> {
+    assert_sparql(
+        "
+            prefix ex: <https://example.com/>
+
+            SELECT DISTINCT ?a ?b
+            WHERE
+            {
+                ?a ex:p+ ?b .
+            }
+        ",
+        "
+            @prefix ex: <https://example.com/> .
+
+            input_graph(1, ex:p, 11) .
+            input_graph(2, ex:p, 22) .
+            input_graph(22, ex:p, 222) .
+            input_graph(222, ex:p, 2222) .
+         ",
+        "1, 11; 2, 22; 2, 222; 2, 2222; 22, 222; 22, 2222; 222, 2222"
+    )
+}
+
+#[test]
+fn path_zero_or_more() -> Result<(), Error> {
+    assert_sparql(
+        "
+            prefix ex: <https://example.com/>
+
+            SELECT DISTINCT ?a ?b
+            WHERE
+            {
+                ?a ex:p* ?b .
+            }
+        ",
+        "
+            @prefix ex: <https://example.com/> .
+
+            input_graph(1, ex:p, 11) .
+            input_graph(2, ex:p, 22) .
+            input_graph(22, ex:p, 222) .
+         ",
+        "1, 11; 2, 22; 2, 222; 22, 222; 1, 1; 2, 2; 22, 22; 222, 222; 11, 11"
+    )
+}
+
+#[test]
+fn path_zero_or_one() -> Result<(), Error> {
+    assert_sparql(
+        "
+            prefix ex: <https://example.com/>
+
+            SELECT DISTINCT ?a ?b
+            WHERE
+            {
+                ?a ex:p? ?b .
+            }
+        ",
+        "
+            @prefix ex: <https://example.com/> .
+
+            input_graph(1, ex:p, 11) .
+            input_graph(2, ex:p, 22) .
+            input_graph(22, ex:p, 222) .
+         ",
+        "1, 11; 2, 22; 22, 222; 1, 1; 2, 2; 22, 22; 222, 222; 11, 11"
+    )
+}
+
+#[test]
+fn path_constants() -> Result<(), Error> {
+    assert_sparql(
+        "
+            prefix ex: <https://example.com/>
+
+            SELECT DISTINCT ?a
+            WHERE
+            {
+                ?a ex:p* 222 .
+            }
+        ",
+        "
+            @prefix ex: <https://example.com/> .
+
+            input_graph(1, ex:p, 11) .
+            input_graph(2, ex:p, 22) .
+            input_graph(22, ex:p, 222) .
+         ",
+        "2; 22; 222"
+    )?;
+    assert_sparql(
+        "
+            prefix ex: <https://example.com/>
+
+            SELECT DISTINCT ?a
+            WHERE
+            {
+                2 ex:p* ?a .
+            }
+        ",
+        "
+            @prefix ex: <https://example.com/> .
+
+            input_graph(1, ex:p, 11) .
+            input_graph(2, ex:p, 22) .
+            input_graph(22, ex:p, 222) .
+         ",
+        "2; 22; 222"
+    )?;
+    assert_sparql(
+        "
+            prefix ex: <https://example.com/>
+            prefix xsd: <http://www.w3.org/2001/XMLSchema#>
+
+            SELECT DISTINCT ?a
+            WHERE
+            {
+                2 ex:p* \"2\"^^xsd:integer .
+                BIND(42 as ?a)
+            }
+        ",
+        "
+            @prefix ex: <https://example.com/> .
+
+            input_graph(1, ex:p, 11) .
+            input_graph(2, ex:p, 22) .
+            input_graph(22, ex:p, 222) .
+         ",
+        "42"
+    )?;
+    assert_sparql(
+        "
+            prefix ex: <https://example.com/>
+            prefix xsd: <http://www.w3.org/2001/XMLSchema#>
+
+            SELECT DISTINCT ?a
+            WHERE
+            {
+                2 ex:q* 2 .
+                BIND(42 as ?a)
+            }
+        ",
+        "
+            @prefix ex: <https://example.com/> .
+
+            input_graph(1, ex:p, 11) .
+            input_graph(2, ex:p, 22) .
+            input_graph(22, ex:p, 222) .
+         ",
+        "42"
+    )?;
+    assert_sparql(
+        "
+            prefix ex: <https://example.com/>
+            prefix xsd: <http://www.w3.org/2001/XMLSchema#>
+
+            SELECT DISTINCT ?a
+            WHERE
+            {
+                2 ex:q* 1 .
+                BIND(42 as ?a)
+            }
+        ",
+        "
+            @prefix ex: <https://example.com/> .
+
+            input_graph(1, ex:p, 11) .
+            input_graph(2, ex:p, 22) .
+            input_graph(22, ex:p, 222) .
+         ",
+        ""
+    )?;
+    assert_sparql(
+        "
+            prefix ex: <https://example.com/>
+            prefix xsd: <http://www.w3.org/2001/XMLSchema#>
+
+            SELECT DISTINCT ?a
+            WHERE
+            {
+                5 ex:q* 5 .
+                BIND(42 as ?a)
+            }
+        ",
+        "
+            @prefix ex: <https://example.com/> .
+
+            input_graph(1, ex:p, 11) .
+            input_graph(2, ex:p, 22) .
+            input_graph(22, ex:p, 222) .
+         ",
+        "42"
+    )?;  // is this standard behaviour? 5 is neither subject nor object so is there really a zero length path between it?
+    assert_sparql(
+        "
+            prefix ex: <https://example.com/>
+            prefix xsd: <http://www.w3.org/2001/XMLSchema#>
+
+            SELECT DISTINCT ?a
+            WHERE
+            {
+                5 ex:q* ?a .
+            }
+        ",
+        "
+            @prefix ex: <https://example.com/> .
+
+            input_graph(1, ex:p, 11) .
+            input_graph(2, ex:p, 22) .
+            input_graph(22, ex:p, 222) .
+         ",
+        "5"
+    )?;  // is this standard behaviour? same as above?
+    assert_sparql(
+        "
+            prefix ex: <https://example.com/>
+            prefix xsd: <http://www.w3.org/2001/XMLSchema#>
+
+            SELECT DISTINCT ?a
+            WHERE
+            {
+                ?a ex:q* 5 .
+            }
+        ",
+        "
+            @prefix ex: <https://example.com/> .
+
+            input_graph(1, ex:p, 11) .
+            input_graph(2, ex:p, 22) .
+            input_graph(22, ex:p, 222) .
+         ",
+        "5"
+    )?;  // is this standard behaviour? same as above?
+    assert_sparql(
+        "
+            prefix ex: <https://example.com/>
+            prefix xsd: <http://www.w3.org/2001/XMLSchema#>
+
+            SELECT DISTINCT ?a
+            WHERE
+            {
+                1 ex:q* ?a .
+            }
+        ",
+        "
+            @prefix ex: <https://example.com/> .
+
+            input_graph(1, ex:p, 11) .
+            input_graph(2, ex:p, 22) .
+            input_graph(22, ex:p, 222) .
+         ",
+        "1"
+    )?;
+    Ok(())
+}
+
+#[test]
+fn path_negated_property_set() -> Result<(), Error> {
+    assert_sparql(
+        "
+            prefix ex: <https://example.com/>
+
+            SELECT DISTINCT ?a ?b
+            WHERE
+            {
+                ?a !(ex:q|ex:p) ?b .
+            }
+        ",
+        "
+            @prefix ex: <https://example.com/> .
+
+            input_graph(1, ex:p, 11) .
+            input_graph(2, ex:q, 22) .
+            input_graph(3, ex:x, 33) .
+         ",
+        "3, 33"
+    )
+}
+
+#[test]
+fn path_inverse_negated_property_set() -> Result<(), Error> {
+    assert_sparql(
+        "
+            prefix ex: <https://example.com/>
+
+            SELECT DISTINCT ?a ?b
+            WHERE
+            {
+                ?a !(ex:p|^ex:p) ?b .
+            }
+        ",
+        "
+            @prefix ex: <https://example.com/> .
+
+            input_graph(1, ex:p, 11) .
+            input_graph(2, ex:q, 22) .
+            input_graph(3, ex:x, 33) .
+         ",
+        "2, 22; 3, 33; 22, 2; 33, 3"
+    )
+}
+
+#[test]
 fn filter() -> Result<(), Error> {
     assert_sparql(
         "

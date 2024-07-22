@@ -4,6 +4,8 @@ use std::fmt::{Debug, Display, Formatter, Write};
 use std::hash::{Hash, Hasher};
 use std::ops;
 use std::rc::Rc;
+use std::str::FromStr;
+use spargebra::term::Term;
 
 const TRUE: &'static str = "\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>";
 const FALSE: &'static str = "\"false\"^^<http://www.w3.org/2001/XMLSchema#boolean>";
@@ -230,9 +232,29 @@ impl Clone for Binding{
             Binding::Operation(o) => Binding::Operation(o.clone()),
         }
     }
+}
 
-    fn clone_from(&mut self, source: &Self) {
-        *self = source.clone();
+impl PartialEq for Binding{
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Binding::Variable(l), Binding::Variable(r)) => l == r,
+            (Binding::Existential(l), Binding::Existential(r)) => l == r,
+            (Binding::Constant(l), Binding::Constant(r)) => {
+                let term1 = Term::from_str(l.as_str());
+                let term2 = Term::from_str(r.as_str());
+                match (term1, term2) {
+                    (Ok(tl), Ok(tr)) => tl == tr,
+                    _ => l == r
+                }
+            },
+            (Binding::Call(Call{func, params}), Binding::Call(Call{func: r_func, params: r_params})) => {
+                func == r_func && params.iter().zip(r_params).all(|(l, r)| l == r)
+            }
+            (Binding::Operation(Operation{op, left, right}), Binding::Operation(Operation{op: r_op, left: r_left, right: r_right})) => {
+                op == r_op && left == r_left && right == r_right
+            }
+            _ => false
+        }
     }
 }
 
@@ -1045,6 +1067,17 @@ impl ProtoPredicate {
     }
 }
 
+impl From<SpecialPredicate> for ProtoPredicate {
+    fn from(value: SpecialPredicate) -> Self {
+        ProtoPredicate::Special(
+            value.prefix,
+            value.bindings.into_iter().map(
+                |(binding, suffix)| (ProtoBinding::Binding(binding), suffix)
+            ).collect()
+        )
+    }
+}
+
 impl From<&dyn TypedPredicate> for ProtoPredicate {
     fn from(value: &dyn TypedPredicate) -> Self {
         ProtoPredicate::Explicit(
@@ -1220,7 +1253,8 @@ impl RuleBuilder {
     fn check(&self){
         assert!(self.partial_atom.is_empty(), "partial atom read");
         if let Some(p) = &self.target_predicate {
-            assert_eq!(p.label(), self.predicate_name, "name mismatch");
+            // uncomment to disallow using predicate under different name
+            //assert_eq!(p.label(), self.predicate_name, "name mismatch");
         }
         else {
             assert!(!self.predicate_name.is_empty(), "predicate name not set");
