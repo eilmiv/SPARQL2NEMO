@@ -1168,6 +1168,198 @@ fn node_type_checks() -> Result<(), Error> {
 }
 
 #[test]
+fn join() -> Result<(), Error> {
+    assert_sparql(
+        "
+            prefix ex: <https://example.com/>
+
+            SELECT DISTINCT ?a ?x
+            WHERE
+            {
+                ?a ex:p ?x .
+                ?a ex:q | ex:other ?x .
+            }
+        ",
+        "
+            @prefix ex: <https://example.com/> .
+
+            input_graph(1, ex:p, 11) .
+            input_graph(1, ex:q, 11) .
+            input_graph(2, ex:other, 22) .
+            input_graph(3, ex:p, 33) .
+            input_graph(4, ex:p, 44) .
+            input_graph(4, ex:other, 44) .
+         ",
+        "1, 11; 4, 44"
+    )
+}
+
+
+#[test]
+fn left_join() -> Result<(), Error> {
+    assert_sparql(
+        "
+            prefix ex: <https://example.com/>
+
+            SELECT DISTINCT ?x ?a ?b
+            WHERE
+            {
+                ?x ex:a ?a .
+                OPTIONAL { ?x ex:b ?b } .
+            }
+        ",
+        "
+            @prefix ex: <https://example.com/> .
+
+            input_graph(1, ex:a, 11) .
+            input_graph(1, ex:b, 12) .
+            input_graph(2, ex:other, 21) .
+            input_graph(3, ex:a, 31) .
+            input_graph(4, ex:a, 41) .
+            input_graph(4, ex:b, 42) .
+            input_graph(5, ex:a, 51) .
+         ",
+        "
+            1, 11, 12
+            3, 31, _:0
+            4, 41, 42
+            5, 51, _:1
+        "
+    )
+}
+
+#[test]
+fn left_join_filter() -> Result<(), Error> {
+    assert_sparql(
+        "
+            prefix ex: <https://example.com/>
+
+            SELECT DISTINCT ?x ?a ?b
+            WHERE
+            {
+                ?x ex:a ?a .
+                OPTIONAL {
+                    ?x ex:b ?b
+                    FILTER(?a > 11)
+                } .
+            }
+        ",
+        "
+            @prefix ex: <https://example.com/> .
+
+            input_graph(1, ex:a, 11) .
+            input_graph(1, ex:b, 12) .
+            input_graph(2, ex:other, 21) .
+            input_graph(3, ex:a, 31) .
+            input_graph(4, ex:a, 41) .
+            input_graph(4, ex:b, 42) .
+            input_graph(5, ex:a, 51) .
+         ",
+        "
+            1, 11, _:0
+            3, 31, _:1
+            4, 41, 42
+            5, 51, _:2
+        "
+    )
+}
+
+#[test]
+fn left_join_positive_exists() -> Result<(), Error> {
+    let sparql = "
+        prefix ex: <https://example.com/>
+
+        SELECT DISTINCT ?x ?a ?b
+        WHERE
+        {
+            ?x ex:a ?a .
+            OPTIONAL {
+                ?x ex:b ?b .
+                FILTER EXISTS { ?a ex:x ?b . }
+            } .
+        }
+        ";
+    assert_sparql(
+        sparql,
+        "
+            @prefix ex: <https://example.com/> .
+
+            input_graph(11, ex:x, 12) .
+            input_graph(1, ex:a, 11) .
+            input_graph(1, ex:b, 12) .
+            input_graph(2, ex:other, 21) .
+            input_graph(3, ex:a, 31) .
+            input_graph(4, ex:a, 41) .
+            input_graph(4, ex:b, 42) .
+            input_graph(5, ex:a, 51) .
+        ",
+        "
+            1, 11, 12
+            3, 31, _:0
+            4, 41, _:1
+            5, 51, _:2
+        "
+    )?;
+    assert!(!translate(sparql).unwrap().contains("~"), "Positive exists should not use negation");
+    Ok(())
+}
+
+#[test]
+fn union() -> Result<(), Error> {
+    assert_sparql(
+        "
+            prefix ex: <https://example.com/>
+
+            SELECT DISTINCT ?a ?x
+            WHERE
+            {
+                { ?a ex:p ?x . }
+                UNION
+                { ?a ex:q ?x . }
+            }
+        ",
+        "
+            @prefix ex: <https://example.com/> .
+
+            input_graph(1, ex:p, 11) .
+            input_graph(2, ex:q, 22) .
+            input_graph(3, ex:other, 33) .
+            input_graph(4, ex:p, 44) .
+            input_graph(5, ex:q, 55) .
+         ",
+        "1, 11; 2, 22; 4, 44; 5, 55"
+    )
+}
+
+#[test]
+fn union_unbound() -> Result<(), Error> {
+    // unbound values are not implemented properly yet; this tests non-standard behaviour
+    assert_sparql(
+        "
+            prefix ex: <https://example.com/>
+
+            SELECT DISTINCT ?a ?x
+            WHERE
+            {
+                { ?a ex:p ?x . }
+                UNION
+                { ?a ex:q ex:o . }
+            }
+        ",
+        "
+            @prefix ex: <https://example.com/> .
+
+            input_graph(1, ex:p, 11) .
+            input_graph(2, ex:q, ex:o) .
+            input_graph(3, ex:other, 33) .
+            input_graph(4, ex:p, 44) .
+            input_graph(5, ex:q, ex:o) .
+         ",
+        "1, 11; 2, _:0; 4, 44; 5, _:1"
+    )
+}
+
+#[test]
 fn bind() -> Result<(), Error> {
     assert_sparql(
         "

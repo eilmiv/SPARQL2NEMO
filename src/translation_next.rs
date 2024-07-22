@@ -684,9 +684,49 @@ impl QueryTranslator {
         }
     }
 
+    fn translate_left_join(&mut self, left: &Box<GraphPattern>, right: &Box<GraphPattern>, expression: &Option<Expression>) -> Result<SolutionSet, TranslateError> {
+        let left_solution = self.translate_pattern(left)?;
+        let right_solution = self.translate_pattern(right)?;
+        nemo_def!(raw_join(??both, ??left, ??right) :- left_solution(??both, ??left), right_solution(??both, ??right); SolutionSet);
+        let filtered_join = match expression {
+            Some(Expression::Exists(pattern)) => {
+                let pattern_solution = self.translate_pattern(pattern)?;
+                let expression_solution = self.translate_positive_exists(&pattern_solution, &raw_join)?;
+                self.translate_filter(&expression_solution, &raw_join)?
+            }
+            Some(e) => {
+                let expression_solution = self.translate_bool_expression(e, &raw_join)?;
+                self.translate_filter(&expression_solution, &raw_join)?
+            },
+            None => raw_join
+        };
+        nemo_def!(left_join(??vars) :- filtered_join(??vars); SolutionSet);
+        add_rule(&left_join, Rule::new(get_vars(&left_join).iter().map(
+            |v| if get_vars(&left_solution).contains(v) { Binding::from(v) } else { Binding::Existential(v.clone()) }
+        ).collect(), vec![to_bound_predicate(&left_solution)], vec![]));
+
+        Ok(left_join)
+    }
+
     fn translate_filter(&mut self, expression: &SolutionExpression, inner: &SolutionSet) -> Result<SolutionSet, TranslateError> {
         nemo_def!(filter(??expr_vars, ??other_vars) :- inner(??expr_vars, ??other_vars), expression(??expr_vars; @result: true); SolutionSet);
         Ok(filter)
+    }
+
+    fn translate_union(&mut self, left: &SolutionSet, right: &SolutionSet) -> Result<SolutionSet, TranslateError> {
+        let left_vars = get_vars(left);
+        let right_vars = get_vars(right);
+        let all_vars = hash_dedup(&left_vars.iter().chain(&right_vars).map(|v| v.clone()).collect());
+        let union = SolutionSet::create("union", all_vars.iter().map(|v| v.clone()).collect());
+        let left_bindings = all_vars.iter().map(
+            |v| if left_vars.contains(v) {Binding::from(v)} else {Binding::Existential(v.clone())}
+        ).collect();
+        let right_bindings = all_vars.iter().map(
+            |v| if right_vars.contains(v) {Binding::from(v)} else {Binding::Existential(v.clone())}
+        ).collect();
+        add_rule(&union, Rule::new(left_bindings, vec![to_bound_predicate(left)], vec![]));
+        add_rule(&union, Rule::new(right_bindings, vec![to_bound_predicate(right)], vec![]));
+        Ok(union)
     }
 
     fn translate_extend(&mut self, inner: &SolutionSet, var: &Variable, expression: &SolutionExpression) -> Result<SolutionSet, TranslateError> {
@@ -756,9 +796,15 @@ impl QueryTranslator {
                 let end = self.translate_term(object, &mut vec![], &mut vec![])?;
                 self.translate_path(start, path, end)
             },
-            //join
-            //positive exists left join
-            //left join
+            GraphPattern::Join{left, right} => {
+                let left_solution = self.translate_pattern(left)?;
+                let right_solution = self.translate_pattern(right)?;
+                nemo_def!(join(??both, ??left, ??right) :- left_solution(??both, ??left), right_solution(??both, ??right); SolutionSet);
+                Ok(join)
+            }
+            GraphPattern::LeftJoin {left, right, expression} => {
+                self.translate_left_join(left, right, expression)
+            }
             GraphPattern::Filter {expr: Expression::Exists(pattern), inner} => {
                 let inner_solution = self.translate_pattern(inner)?;
                 let exists_solution = self.translate_pattern(pattern)?;
@@ -770,7 +816,11 @@ impl QueryTranslator {
                 let expr_solution = self.translate_bool_expression(expr, &inner_solution)?;
                 self.translate_filter(&expr_solution, &inner_solution)
             }
-            //union
+            GraphPattern::Union {left, right} => {
+                let left_solution = self.translate_pattern(left)?;
+                let right_solution = self.translate_pattern(right)?;
+                self.translate_union(&left_solution, &right_solution)
+            }
             GraphPattern::Extend{inner, variable, expression} => {
                 let inner_solution = self.translate_pattern(inner)?;
                 let expr_solution = self.translate_expression(expression, &inner_solution)?;
