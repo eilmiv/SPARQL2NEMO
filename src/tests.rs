@@ -24,6 +24,14 @@ fn execute_nemo(program_string: String) -> Result<Vec<Vec<AnyDataValue>>, Error>
 }
 
 fn parse_expectation(expectation: &str) -> Vec<Vec<String>> {
+    if expectation.starts_with("[") && expectation.ends_with("]") {
+        let inner_expectation = parse_expectation(&expectation[1..expectation.len()-1]);
+        return inner_expectation.iter().enumerate().map(|(i, vec)| {
+            let mut new_vec = vec.clone();
+            new_vec.insert(0, i.to_string());
+            new_vec
+        }).collect()
+    }
     expectation
         .split(|c| c == ';' || c == '\n')
         .map(|row| row.split(',').map(|s| s.trim().to_string()).collect())
@@ -164,6 +172,35 @@ fn bgp() -> Result<(), Error> {
             1, 3
             1, 4
         "
+    )
+}
+
+#[test]
+fn bgp_multi() -> Result<(), Error> {
+    assert_sparql(
+        "
+            prefix ex: <https://example.com/>
+
+            SELECT ?a
+            WHERE
+            {
+              ?a ex:p [ex:q ex:o] .
+            }
+        ",
+        "
+            @prefix ex: <https://example.com/> .
+
+            input_graph(1, ex:p, ex:11) .
+            input_graph(ex:11, ex:q, ex:o) .
+            input_graph(2, ex:p, ex:20) .
+            input_graph(3, ex:p, ex:31) .
+            input_graph(ex:31, ex:q, ex:o) .
+            input_graph(3, ex:p, ex:32) .
+            input_graph(ex:32, ex:q, ex:o) .
+            input_graph(3, ex:p, ex:33) .
+            input_graph(ex:33, ex:q, ex:o) .
+         ",
+        "[1; 3; 3; 3]"
     )
 }
 

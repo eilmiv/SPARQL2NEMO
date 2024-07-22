@@ -6,6 +6,7 @@ Translation to SPARQL algebra uses [spargebra](https://docs.rs/spargebra/latest/
 
 ## Supported Features
 Currently supported features can be found in [translation.rs](src/translation.rs). 
+A different version of the translation using the "nemo in rust" macros can be found in [translation_next.rs](src/translation_next.rs).
 Functions are generally named after the SPARQL algebra operation they translate. 
 
 There are special suffixes for functions that do not produce solution sets:
