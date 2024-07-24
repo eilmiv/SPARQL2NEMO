@@ -1,10 +1,10 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use spargebra::algebra::{AggregateExpression, Expression, Function, GraphPattern, OrderExpression, PropertyPathExpression};
 use spargebra::Query;
 use spargebra::term::{BlankNode, GroundTerm, Literal, NamedNode, NamedNodePattern, TermPattern, TriplePattern, Variable};
 use crate::error::TranslateError;
-use crate::error::TranslateError::{AggregationNotImplemented, ExpressionNotImplemented, MultiPatternNotImplemented, PatternNotImplemented, SequencePatternNotImplemented, TermNotImplemented, Todo};
+use crate::error::TranslateError::{AggregationNotImplemented, ExpressionNotImplemented, MultiPatternNotImplemented, PathNotImplemented, PatternNotImplemented, SequencePatternNotImplemented, TermNotImplemented, Todo};
 use crate::nemo_model::{add_fact, add_rule, Binding, BoundPredicate, Call, construct_program, Fact, get_vars, hash_dedup, nemo_add, nemo_call, nemo_declare, nemo_def, nemo_filter, nemo_predicate_type, nemo_var, PredicatePtr, ProtoPredicate, Rule, SpecialPredicate, to_bound_predicate, TypedPredicate, VarPtr};
 
 nemo_predicate_type!(SolutionSet = ...);
@@ -88,7 +88,7 @@ impl QueryTranslator {
     }
 
     fn translate_expression_named_node(&mut self, node: &NamedNode) -> Result<SolutionExpression, TranslateError> {
-        let named_node = SolutionExpression::create("named_node", vec![]);
+        let named_node = SolutionExpression::create("named_node", vec![VarPtr::new("result")]);
         nemo_add!(named_node(node.clone()));
         Ok(named_node)
     }
@@ -1072,15 +1072,67 @@ impl QueryTranslator {
     }
 
     fn translate_describe(&mut self, pattern: &GraphPattern) -> Result<SolutionSet, TranslateError> {
-        Err(Todo("implement describe"))
+        // return Err(PatternNotImplemented(pattern.clone()));
+        let solution = self.translate_pattern(pattern)?;
+        let output_graph = SolutionSet::create("output_graph", vec![VarPtr::new("s"), VarPtr::new("s"), VarPtr::new("o")]);
+        let input_graph = self.triple_set();
+        for v in get_vars(&solution){
+            nemo_add!(output_graph(v, ?p, ?o) :- input_graph(v, ?p, ?o), {&solution});
+        }
+        Ok(output_graph)
     }
 
     fn translate_ask(&mut self, pattern: &GraphPattern) -> Result<SolutionSet, TranslateError> {
-        Err(Todo("implement ask"))
+        let solution = self.translate_pattern(pattern)?;
+        let dummy = SolutionSet::create("dummy", vec![VarPtr::new("d")]);
+        nemo_add!(dummy(0));
+        nemo_def!(ask(true) :- {&solution}; SolutionSet);
+        nemo_add!(ask(false) :- dummy(0), ~{&solution});
+        Ok(ask)
+    }
+
+    fn extract_bnodes(&mut self, pattern: &TriplePattern, bnodes: &mut Vec<VarPtr>) -> Result<(), TranslateError> {
+        let TriplePattern{subject, predicate, object} = pattern;
+        self.translate_term(subject, &mut vec![], bnodes)?;
+        self.translate_term(object, &mut vec![], bnodes)?;
+        Ok(())
     }
 
     fn translate_construct(&mut self, pattern: &GraphPattern, template: &Vec<TriplePattern>) -> Result<SolutionSet, TranslateError> {
-        Err(Todo("implement construct"))
+        let (s, p, o) = (VarPtr::new("s"), VarPtr::new("p"), VarPtr::new("o"));
+        let solution = self.translate_pattern(pattern)?;
+        let mut bnodes = Vec::new();
+        for pattern in template {self.extract_bnodes(pattern, &mut bnodes)?}
+        let bnodes = hash_dedup(&bnodes);
+        let bnode_solution = SolutionSet::create("bnode_solution", get_vars(&solution).iter().chain(bnodes.iter()).map(|v| v.clone()).collect());
+        add_rule(&bnode_solution, Rule::new(
+            get_vars(&solution).iter()
+                .map(Binding::from)
+                .chain(
+                    bnodes.iter().map(|n| Binding::Existential(n.clone()))
+                ).collect(),
+            vec![to_bound_predicate(&solution)],
+            vec![])
+        );
+        let proto_graph = SolutionSet::create("proto_graph", vec![s.clone(), p.clone(), o.clone()]);
+
+        for t in template {
+            nemo_add!(
+                proto_graph(
+                    self.translate_term(&t.subject, &mut vec![], &mut vec![])?,
+                    match &t.predicate {
+                        NamedNodePattern::NamedNode(n) => Binding::from(n),
+                        NamedNodePattern::Variable(v) => Binding::from(self.sparql_vars.get(v)),
+                    },
+                    self.translate_term(&t.object, &mut vec![], &mut vec![])?
+                ) :- {&bnode_solution}
+            );
+        }
+
+        let subject_is_valid = nemo_call!(OR; nemo_call!(isNull; s), nemo_call!(isIri; s));
+        let predicate_is_valid = nemo_call!(isIri; p);
+        nemo_def!(construct(s, p, o) :- proto_graph(s, p, o), {nemo_filter!("", nemo_call!(AND; subject_is_valid, predicate_is_valid), " = ", true, "")}; SolutionSet);
+        Ok(construct)
     }
 
     fn is_distinct(pattern: &GraphPattern) -> bool {

@@ -1696,3 +1696,95 @@ fn order_by() -> Result<(), Error> {
     )
 }
 
+#[test]
+fn describe() -> Result<(), Error> {
+    assert_sparql(
+        "
+            prefix ex: <https://example.com/>
+
+            DESCRIBE ?x ?o <https://example.com/x>
+            WHERE    {?x ex:x ?o}
+        ",
+        "
+            @prefix ex: <https://example.com/> .
+
+            input_graph(1, ex:x, 1) .
+            input_graph(1, ex:x, 2) .
+            input_graph(2, ex:x, 0) .
+            input_graph(3, ex:y, 0) .
+            input_graph(ex:x, ex:x, 6) .
+        ",
+        "
+            1, <https://example.com/x>, 1
+            1, <https://example.com/x>, 2
+            2, <https://example.com/x>, 0
+            <https://example.com/x>, <https://example.com/x>, 6
+        "
+    )
+}
+
+#[test]
+fn ask() -> Result<(), Error> {
+    let t = "\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>";
+    let f = "\"false\"^^<http://www.w3.org/2001/XMLSchema#boolean>";
+    assert_sparql(
+        "
+            prefix ex: <https://example.com/>
+
+            ASK {?x ex:x ex:o}
+        ",
+        "
+            @prefix ex: <https://example.com/> .
+
+            input_graph(1, ex:x, 1) .
+            input_graph(1, ex:x, ex:o) .
+            input_graph(12, ex:x, ex:o) .
+        ",
+        t
+    )?;
+    assert_sparql(
+        "
+            prefix ex: <https://example.com/>
+
+            ASK {?x ex:x ex:o}
+        ",
+        "
+            @prefix ex: <https://example.com/> .
+
+            input_graph(1, ex:x, 1) .
+            input_graph(1, ex:x, ex:p) .
+            input_graph(12, ex:y, ex:o) .
+        ",
+        f
+    )?;
+    Ok(())
+}
+
+
+#[test]
+fn construct() -> Result<(), Error> {
+    assert_sparql(
+        "
+            prefix ex: <https://example.com/>
+
+            CONSTRUCT WHERE {_:1 ex:x ?a . ?a ex:y _:1 . ex:a ex:b ex:c . }
+        ",
+        "
+            @prefix ex: <https://example.com/> .
+
+            input_graph(ex:s, ex:x, 1) .
+            input_graph(1, ex:y, ex:s) .
+            input_graph(ex:s, ex:x, ex:o) .
+            input_graph(ex:o, ex:y, ex:s) .
+            input_graph(ex:s, ex:z, ex:o) .
+            input_graph(ex:o, ex:z, ex:s) .
+            input_graph(ex:a, ex:b, ex:c) .
+        ",
+        "
+            _:1, <https://example.com/x>, 1
+            _:0, <https://example.com/x>, <https://example.com/o>
+            <https://example.com/o>, <https://example.com/y>, _:0
+            <https://example.com/a>, <https://example.com/b>, <https://example.com/c>
+        "
+    )
+}
