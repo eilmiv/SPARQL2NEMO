@@ -374,6 +374,12 @@ binding_operator!(Div, div, "/");
 binding_operator!(Sub, sub, "-");
 
 
+fn make_non_empty(bindings: String) -> String {
+    if bindings.is_empty(){ "arity_zero".to_string() }
+    else { bindings }
+}
+
+
 /// A predicate with bound positions
 #[derive(Debug)]
 pub struct BoundPredicate {
@@ -391,10 +397,10 @@ impl BoundPredicate {
     }
 
     fn nemo_string(&self, var_names: &mut VariableTranslator, state: &mut GenState) -> String {
-        let inner = self.bindings.iter()
+        let inner = make_non_empty(self.bindings.iter()
             .map(|b| b.nemo_string(var_names))
             .collect::<Vec<_>>()
-            .join(", ");
+            .join(", "));
         let predicate_name = self.predicate.construct_program(state);
         let negated = if(self.negated) {"~"} else {""};
         format!("{negated}{predicate_name}({inner})")
@@ -474,10 +480,10 @@ impl Rule {
 
     fn construct_for(&self, predicate_name: &str, state: &mut GenState) -> String {
         let mut var_names = VariableTranslator::new();
-        let head_inner = self.bindings.iter()
+        let head_inner = make_non_empty(self.bindings.iter()
             .map(|b| b.nemo_string(&mut var_names))
             .collect::<Vec<_>>()
-            .join(", ");
+            .join(", "));
         let body = self.body.iter()
             .map(|a| a.nemo_string(&mut var_names, state))
             .collect::<Vec<_>>()
@@ -556,7 +562,7 @@ impl Fact {
     fn write_for(&self, predicate_name: &str, state: &mut GenState){
         state.add_line(format!(
             "{predicate_name}({}) .",
-            self.bindings.join(", ")
+            make_non_empty(self.bindings.join(", "))
         ));
     }
 }

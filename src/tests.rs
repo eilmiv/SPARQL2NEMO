@@ -1405,3 +1405,269 @@ fn bind_with_expression_error() -> Result<(), Error> {
         "1, 5; 2, _:0"
     )
 }
+
+#[test]
+fn minus() -> Result<(), Error> {
+    assert_sparql(
+        "
+            prefix ex: <https://example.com/>
+
+            SELECT DISTINCT ?a ?b
+            WHERE
+            {
+                {
+                    ?a ex:x ?b .
+                    BIND(1 as ?c)
+                }
+                MINUS
+                {
+                    ?a ex:y ?b .
+                    BIND(1 as ?d)
+                }
+            }
+        ",
+        "
+            @prefix ex: <https://example.com/> .
+
+            input_graph(1, ex:x, 5) .
+            input_graph(1, ex:y, 5) .
+            input_graph(2, ex:x, 5) .
+            input_graph(2, ex:x, 6) .
+            input_graph(2, ex:y, 6) .
+            input_graph(3, ex:x, 7) .
+         ",
+        "2, 5; 3, 7"
+    )
+}
+
+#[test]
+fn values() -> Result<(), Error> {
+    // this is not correct sparql behaviour yet
+    // note: values tuple with missing value in tuple is parsing error
+    assert_sparql(
+        "
+            prefix ex: <https://example.com/>
+
+            SELECT DISTINCT *
+            WHERE
+            {
+                VALUES (?a ?b ?c) {
+                    (ex:a 1 2)
+                    (ex:b UNDEF 3)
+                    (ex:c 5 UNDEF)
+                    (ex:a UNDEF UNDEF)
+                }
+            }
+        ",
+        "",
+        "<https://example.com/a>, 1, 2; <https://example.com/b>, _:0, 3; <https://example.com/c>, 5, _:1"
+    )  // standard compliant behaviour is to also include a line for (a UNDEF UNDEF) but this gets omitted because of how existential rules work in nemo
+}
+
+#[test]
+fn order_by_irrelevant() -> Result<(), Error> {
+    // order by has no effect in this example
+    assert_sparql(
+        "
+            prefix ex: <https://example.com/>
+
+            SELECT DISTINCT ?a ?b
+            WHERE
+            {
+                ?a ex:x ?b
+                {
+                    SELECT ?a ?b
+                    WHERE { ?a ex:x ?b }
+                    ORDER BY DESC(?b)
+                }
+            }
+        ",
+        "
+            @prefix ex: <https://example.com/> .
+
+            input_graph(1, ex:x, 2) .
+            input_graph(2, ex:x, 3) .
+        ",
+        "1, 2; 2, 3"
+    )
+}
+
+#[test]
+fn limit() -> Result<(), Error> {
+    assert_sparql(
+        "
+            prefix ex: <https://example.com/>
+
+            SELECT DISTINCT ?a ?b
+            WHERE
+            {
+                ?a ex:x ?b
+            }
+            LIMIT 2
+        ",
+        "
+            @prefix ex: <https://example.com/> .
+
+            input_graph(1, ex:x, 11) .
+            input_graph(2, ex:x, 22) .
+            input_graph(3, ex:x, 33) .
+            input_graph(4, ex:x, 44) .
+        ",
+        "1, 11; 2, 22"
+    )
+}
+
+#[test]
+fn limit_nested() -> Result<(), Error> {
+    assert_sparql(
+        "
+            prefix ex: <https://example.com/>
+
+            SELECT DISTINCT ?a ?b
+            WHERE
+            {
+                BIND(1 as ?x)
+                {
+                    SELECT DISTINCT ?a ?b
+                    WHERE { ?a ex:x ?b }
+                    LIMIT 2
+                }
+            }
+        ",
+        "
+            @prefix ex: <https://example.com/> .
+
+            input_graph(1, ex:x, 11) .
+            input_graph(2, ex:x, 22) .
+            input_graph(3, ex:x, 33) .
+            input_graph(4, ex:x, 44) .
+        ",
+        "1, 11; 2, 22"
+    )
+}
+
+
+
+#[test]
+fn limit_sequence() -> Result<(), Error> {
+    assert_sparql(
+        "
+            prefix ex: <https://example.com/>
+
+            SELECT ?a ?b
+            WHERE
+            {
+                ?a ex:x ?b
+            }
+            LIMIT 2
+            OFFSET 1
+        ",
+        "
+            @prefix ex: <https://example.com/> .
+
+            input_graph(1, ex:x, 11) .
+            input_graph(2, ex:x, 22) .
+            input_graph(3, ex:x, 33) .
+            input_graph(4, ex:x, 44) .
+        ",
+        "[2, 22; 3, 33]"
+    )
+}
+
+
+#[test]
+fn offset() -> Result<(), Error> {
+    assert_sparql(
+        "
+            prefix ex: <https://example.com/>
+
+            SELECT DISTINCT ?a ?b
+            WHERE
+            {
+                ?a ex:x ?b
+            }
+            OFFSET 2
+        ",
+        "
+            @prefix ex: <https://example.com/> .
+
+            input_graph(1, ex:x, 11) .
+            input_graph(2, ex:x, 22) .
+            input_graph(3, ex:x, 33) .
+            input_graph(4, ex:x, 44) .
+        ",
+        "3, 33; 4, 44"
+    )
+}
+
+#[test]
+fn group_by() -> Result<(), Error> {
+    assert_sparql(
+        "
+            prefix ex: <https://example.com/>
+
+            SELECT DISTINCT ?a (SUM(DISTINCT ?b + 1) as ?s) (COUNT(DISTINCT ?b) as ?c)
+            WHERE
+            {
+                ?a ex:x ?b
+            }
+            GROUP BY ?a
+        ",
+        "
+            @prefix ex: <https://example.com/> .
+
+            input_graph(1, ex:x, 10) .
+            input_graph(1, ex:x, 11) .
+            input_graph(2, ex:x, 20) .
+            input_graph(2, ex:x, 21) .
+        ",
+        "1, 23, 2; 2, 43, 2"
+    )
+}
+
+#[test]
+fn count_star() -> Result<(), Error> {
+    assert_sparql(
+        "
+            prefix ex: <https://example.com/>
+
+            SELECT DISTINCT (COUNT(DISTINCT *) as ?c)
+            WHERE
+            {
+                ?a ex:x ?b
+            }
+        ",
+        "
+            @prefix ex: <https://example.com/> .
+
+            input_graph(1, ex:x, 10) .
+            input_graph(1, ex:x, 11) .
+            input_graph(2, ex:x, 20) .
+            input_graph(2, ex:x, 21) .
+        ",
+        "4"
+    )
+}
+
+#[test]
+fn reduced() -> Result<(), Error> {
+    assert_sparql(
+        "
+            prefix ex: <https://example.com/>
+
+            SELECT REDUCED ?a ?b
+            WHERE
+            {
+                ?a ex:x ?b
+            }
+        ",
+        "
+            @prefix ex: <https://example.com/> .
+
+            input_graph(1, ex:x, 10) .
+            input_graph(1, ex:x, 11) .
+        ",
+        "[1, 10; 1, 11]"
+    )
+}
+

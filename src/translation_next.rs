@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 use std::fmt::Debug;
-use spargebra::algebra::{Expression, Function, GraphPattern, PropertyPathExpression};
+use spargebra::algebra::{AggregateExpression, Expression, Function, GraphPattern, PropertyPathExpression};
 use spargebra::Query;
-use spargebra::term::{BlankNode, Literal, NamedNode, NamedNodePattern, TermPattern, TriplePattern, Variable};
+use spargebra::term::{BlankNode, GroundTerm, Literal, NamedNode, NamedNodePattern, TermPattern, TriplePattern, Variable};
 use crate::error::TranslateError;
-use crate::error::TranslateError::{ExpressionNotImplemented, MultiPatternNotImplemented, PatternNotImplemented, SequencePatternNotImplemented, TermNotImplemented, Todo};
-use crate::nemo_model::{add_rule, Binding, BoundPredicate, Call, construct_program, get_vars, hash_dedup, nemo_add, nemo_call, nemo_declare, nemo_def, nemo_filter, nemo_predicate_type, nemo_var, PredicatePtr, ProtoPredicate, Rule, SpecialPredicate, to_bound_predicate, TypedPredicate, VarPtr};
+use crate::error::TranslateError::{AggregationNotImplemented, ExpressionNotImplemented, MultiPatternNotImplemented, PatternNotImplemented, SequencePatternNotImplemented, TermNotImplemented, Todo};
+use crate::nemo_model::{add_fact, add_rule, Binding, BoundPredicate, Call, construct_program, Fact, get_vars, hash_dedup, nemo_add, nemo_call, nemo_declare, nemo_def, nemo_filter, nemo_predicate_type, nemo_var, PredicatePtr, ProtoPredicate, Rule, SpecialPredicate, to_bound_predicate, TypedPredicate, VarPtr};
 
 nemo_predicate_type!(SolutionSet = ...);
 nemo_predicate_type!(SolutionMultiSet = count ...);
@@ -547,6 +547,11 @@ impl QueryTranslator {
         for triple in patterns {
             body_parts.push(self.translate_triple(triple, &mut variables, &mut vec![])?)
         }
+        if patterns.is_empty() {
+            let dummy = SolutionSet::create("dummy",vec![]);
+            nemo_add!(dummy());
+            body_parts.push(to_bound_predicate(&dummy))
+        }
         variables = hash_dedup(&variables);
         let result = SolutionSet::create("bgp", variables.iter().map(|v| v.clone()).collect());
         add_rule(
@@ -568,7 +573,11 @@ impl QueryTranslator {
         bnode_vars = hash_dedup(&bnode_vars);
         let result = SolutionMultiSet::create("bgp", variables.iter().map(|v| v.clone()).collect());
         let mut bindings: Vec<_> = variables.into_iter().map(Binding::from).collect();
-        bindings[0] = Binding::Call(Call::new("#count", bnode_vars.iter().map(Binding::from).collect()));
+        bindings[0] = if bnode_vars.is_empty() {
+            Binding::from(1)
+        } else {
+            Binding::Call(Call::new("#count", bnode_vars.iter().map(Binding::from).collect()))
+        };
         add_rule(
             &result,
             Rule::new(bindings, body_parts, vec![])
@@ -736,6 +745,25 @@ impl QueryTranslator {
         Ok(extend)
     }
 
+    fn translate_ground_term(&mut self, term: &Option<GroundTerm>) -> Binding {
+        match term {
+            None => nemo_var!(!UNDEF),
+            Some(GroundTerm::Literal(l)) => Binding::from(l),
+            Some(GroundTerm::NamedNode(n)) => Binding::from(n),
+            _ => unreachable!("rdf* feature is not enabled")
+        }
+    }
+
+    fn translate_values(&mut self, variables: &Vec<Variable>, bindings: &Vec<Vec<Option<GroundTerm>>>) -> SolutionSet {
+        let dummy = SolutionSet::create("dummy", vec![VarPtr::new("x")]);
+        let values = SolutionSet::create("values", variables.iter().map(|v| self.sparql_vars.get(v)).collect());
+        nemo_add!(dummy(1));
+        for binding in bindings {
+            add_rule(&values, Rule::new(binding.iter().map(|b| self.translate_ground_term(b)).collect(), vec![to_bound_predicate(&dummy)], vec![]))
+        }
+        values
+    }
+
     fn translate_project(&mut self, inner: &SolutionSet, variables: &Vec<Variable>) -> Result<SolutionSet, TranslateError> {
         let nemo_vars: Vec<VarPtr> = variables.into_iter().map(|v| self.sparql_vars.get(v)).collect();
         let projection = SolutionSet::create("projection", nemo_vars);
@@ -759,8 +787,71 @@ impl QueryTranslator {
         Ok(projection)
     }
 
-    fn translate_slice(&mut self, inner: &SolutionSequence, start: usize, length: Option<usize>) -> Result<SolutionSet, TranslateError> {
-        Err(Todo("implement slice"))
+    fn translate_slice_seq(&mut self, inner: &SolutionSequence, start: usize, length: Option<usize>) -> SolutionSequence {
+        let index = nemo_var!(index);
+        let lower = nemo_filter!("", index, " >= ", start, "");
+        let upper = match length {
+            None => nemo_filter!("0 = 0"),
+            Some(l) => nemo_filter!("", index, " < ", start + l, ""),
+        };
+        nemo_def!(slice(@index: index.clone() - start; ??vars) :- inner(@index: index; ??vars), {lower}, {upper}; SolutionSequence);
+        slice
+    }
+
+    fn translate_slice(&mut self, inner: &SolutionSet, start: usize, length: Option<usize>) -> SolutionSet {
+        let inner_sequence = self.get_sequence(inner);
+        let slice_sequence = self.translate_slice_seq(&inner_sequence, start, length);
+        nemo_def!(slice_set(??vars) :- slice_sequence(@index: ?i; ??vars); SolutionSet);
+        slice_set
+    }
+
+    fn translate_aggregation(&mut self, inner: &dyn TypedPredicate, variable: VarPtr, expression: &Expression, aggregation: &str, group_vars: &Vec<VarPtr>, idempotent: bool) -> Result<SolutionSet, TranslateError>{
+        let expr_solution = self.translate_expression(expression, inner)?;
+
+        let aggregate_vars = if idempotent {
+            vec![expr_solution.result_var()]
+        }
+        else {
+            vec![expr_solution.result_var()].iter()
+                .chain(get_vars(inner).iter().filter(|v| !group_vars.contains(v)))
+                .map(|v| v.clone())
+                .collect()
+        };
+        let aggregate = SolutionSet::create(&format!("{aggregation}_aggregate"), group_vars.iter().map(|v| v.clone()).chain(vec![variable]).collect());
+        let aggregation_call = Call::new(&format!("#{aggregation}"), aggregate_vars.iter().map(Binding::from).collect());
+        nemo_add!(aggregate(??group_vars, aggregation_call) :- inner(??group_vars, ??other), {&expr_solution});
+        Ok(aggregate)
+    }
+
+    fn translate_count_all(&mut self, inner: &dyn TypedPredicate, variable: VarPtr, group_vars: Vec<VarPtr>) -> Result<SolutionSet, TranslateError> {
+        let aggregate_vars: Vec<VarPtr> = get_vars(inner).iter().filter(|v| !group_vars.contains(v)).map(|v| v.clone()).collect();
+        let aggregation_call = Call::new("#count", aggregate_vars.iter().map(Binding::from).collect());
+        let count_all = SolutionSet::create("count_all", group_vars.into_iter().chain(vec![variable]).collect());
+        nemo_add!(count_all(??group_vars, aggregation_call) :- inner(??group_vars, ??other));
+        Ok(count_all)
+    }
+
+    fn translate_group_by(&mut self, inner: &SolutionSet, group_vars: &Vec<Variable>, aggregates: &Vec<(Variable, AggregateExpression)>) -> Result<SolutionSet, TranslateError> {
+        let collect_aggregations = SolutionSet::create(
+            "collect_aggregations",
+            group_vars.iter().chain(aggregates.iter().map(|(v, a)| v)).map(|v| self.sparql_vars.get(v)).collect()
+        );
+        let mut body = vec![to_bound_predicate(inner)];
+        for (variable, aggregation) in aggregates {
+            let var = self.sparql_vars.get(variable);
+            let group_by_vars = group_vars.iter().map(|v| self.sparql_vars.get(v)).collect();
+            let aggregation_solution = match aggregation {
+                AggregateExpression::Count {expr: None, distinct: true} => self.translate_count_all(inner, var, group_by_vars),
+                AggregateExpression::Count {expr: Some(expr), distinct: true} => self.translate_aggregation(inner, var, expr, "count", &group_by_vars, false),
+                AggregateExpression::Sum {expr, distinct: true} => self.translate_aggregation(inner, var, expr, "sum", &group_by_vars, false),
+                AggregateExpression::Min {expr, distinct: true} => self.translate_aggregation(inner, var, expr, "min", &group_by_vars, true),
+                AggregateExpression::Max {expr, distinct: true} => self.translate_aggregation(inner, var, expr, "max", &group_by_vars, true),
+                _ => Err(AggregationNotImplemented(aggregation.clone()))
+            }?;
+            body.push(to_bound_predicate(&aggregation_solution));
+        }
+        add_rule(&collect_aggregations, Rule::new(get_vars(&collect_aggregations).iter().map(Binding::from).collect(), body, vec![]));
+        Ok(collect_aggregations)
     }
 
     fn get_multi(&mut self, inner: &SolutionSet) -> SolutionMultiSet {
@@ -786,6 +877,11 @@ impl QueryTranslator {
         let pre_sequence = self.get_sequence(&pre_index);
         nemo_def!(sequence(@index: ?i; ??vars) :- pre_sequence(@index: ?i; ??vars, remaining); SolutionSequence);
         sequence
+    }
+
+    fn get_multi_from_sequence(&mut self, inner: &SolutionSequence) -> SolutionMultiSet {
+        nemo_def!(as_multi(@count: %count(?i); ??vars) :- inner(@index: ?i; ??vars); SolutionMultiSet);
+        as_multi
     }
 
     fn translate_pattern(&mut self, pattern: &GraphPattern) -> Result<SolutionSet, TranslateError> {
@@ -826,17 +922,40 @@ impl QueryTranslator {
                 let expr_solution = self.translate_expression(expression, &inner_solution)?;
                 self.translate_extend(&inner_solution, variable, &expr_solution)
             }
-            //minus
-            //values
-            //order by
+            GraphPattern::Minus {left, right} => {
+                let left_solution = self.translate_pattern(left)?;
+                let right_solution = self.translate_pattern(right)?;
+                nemo_def!(minus(??both, ??left) :- left_solution(??both, ??left), ~right_solution(??both, ??right); SolutionSet);
+                Ok(minus)
+            }
+            GraphPattern::Values {variables, bindings} => {
+                Ok(self.translate_values(variables, bindings))
+            }
+            GraphPattern::OrderBy {inner, expression} => {
+                // SolutionSet does not contain ordering information
+                let inner_solution = self.translate_pattern(inner)?;
+                nemo_def!(irrelevant_order_by(??vars) :- inner_solution(??vars); SolutionSet);
+                Ok(irrelevant_order_by)
+            }
             GraphPattern::Project {inner, variables} => {
                 let inner_solution = self.translate_pattern(inner)?;
                 self.translate_project(&inner_solution, variables)
             }
-            //distinct
-            //reduced
-            //slice
-            //group
+            GraphPattern::Distinct {inner} => {
+                // solution sets are always distinct
+                self.translate_pattern(inner)
+            }
+            GraphPattern::Reduced {inner} => {
+                self.translate_pattern(inner)
+            }
+            GraphPattern::Slice {inner, start, length} => {
+                let inner_solution = self.translate_pattern(inner)?;
+                Ok(self.translate_slice(&inner_solution, *start, *length))
+            }
+            GraphPattern::Group {inner, variables, aggregates} => {
+                let inner_solution = self.translate_pattern(inner)?;
+                self.translate_group_by(&inner_solution, variables, aggregates)
+            }
             //GraphPattern::Service {name, inner, silent} => Err(PatternNotImplemented(pattern.clone())),
             _ => Err(PatternNotImplemented(pattern.clone()))
         }
@@ -874,7 +993,11 @@ impl QueryTranslator {
                 let inner_solution = self.translate_pattern(inner)?;
                 Ok(self.get_multi(&inner_solution))
             },
-            //GraphPattern::Slice {inner, start, length} => translate_slice_multi(state, inner, *start, *length),
+            GraphPattern::Slice {inner, start, length} => {
+                let inner_solution = self.translate_pattern_seq(inner)?;
+                let seq_solution = self.translate_slice_seq(&inner_solution, *start, *length);
+                Ok(self.get_multi_from_sequence(&seq_solution))
+            },
             //GraphPattern::Group {inner, variables, aggregates} => translate_group_by_multi(state, inner, variables, aggregates),
             //GraphPattern::Service {name, inner, silent} => Err(PatternNotImplemented(pattern.clone())),
             _ => Err(MultiPatternNotImplemented(pattern.clone()))
@@ -897,7 +1020,10 @@ impl QueryTranslator {
                 let inner_solution = self.translate_pattern_seq(inner)?;
                 self.translate_project_seq(&inner_solution, variables)
             },
-            //GraphPattern::Slice {inner, start, length} => self.translate_slice_seq(inner, *start, *length),
+            GraphPattern::Slice {inner, start, length} => {
+                let inner_solution = self.translate_pattern_seq(inner)?;
+                Ok(self.translate_slice_seq(&inner_solution, *start, *length))
+            },
             //service
 
             GraphPattern::Bgp {patterns: _}
@@ -943,9 +1069,9 @@ impl QueryTranslator {
                 pattern: GraphPattern::Slice { inner, start, length },
                 dataset: _,
                 base_iri: _
-            } if QueryTranslator::is_distinct(inner) => {
-                let inner_sequence = self.translate_pattern_seq(inner)?;
-                Ok(Box::new(self.translate_slice(&inner_sequence, *start, *length)?))
+            } if Self::is_distinct(inner) => {
+                let inner_sequence = self.translate_pattern(inner)?;
+                Ok(Box::new(self.translate_slice(&inner_sequence, *start, *length)))
             }
             Query::Select {pattern, dataset: _, base_iri: _} => Ok(Box::new(self.translate_pattern_seq(pattern)?)),
             Query::Describe {pattern, dataset: _, base_iri: _} => Ok(Box::new(self.translate_describe(pattern)?)),
