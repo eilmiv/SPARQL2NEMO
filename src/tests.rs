@@ -1671,3 +1671,28 @@ fn reduced() -> Result<(), Error> {
     )
 }
 
+#[test]
+fn order_by() -> Result<(), Error> {
+    assert_sparql(
+        "
+            prefix ex: <https://example.com/>
+
+            SELECT ?a ?b
+            WHERE
+            {
+                ?a ex:x ?b
+            }
+            ORDER BY DESC(-?b) ?a
+        ",
+        "
+            @prefix ex: <https://example.com/> .
+
+            input_graph(1, ex:x, 1) .
+            input_graph(1, ex:x, 2) .
+            input_graph(2, ex:x, 0) .
+            input_graph(3, ex:x, 0) .
+        ",
+        "[2, 0; 3, 0; 1, 1; 1, 2]"
+    )
+}
+

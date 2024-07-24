@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fmt::Debug;
-use spargebra::algebra::{AggregateExpression, Expression, Function, GraphPattern, PropertyPathExpression};
+use spargebra::algebra::{AggregateExpression, Expression, Function, GraphPattern, OrderExpression, PropertyPathExpression};
 use spargebra::Query;
 use spargebra::term::{BlankNode, GroundTerm, Literal, NamedNode, NamedNodePattern, TermPattern, TriplePattern, Variable};
 use crate::error::TranslateError;
@@ -854,6 +854,35 @@ impl QueryTranslator {
         Ok(collect_aggregations)
     }
 
+    /// a stable sort
+    fn translate_sort(&mut self, inner: &SolutionSequence, order_expression: &OrderExpression) -> Result<SolutionSequence, TranslateError> {
+        let val = nemo_var!(sort_val);
+        let other_val = nemo_var!(other_sort_val);
+        let index = nemo_var!(index);
+        let other_index = nemo_var!(other_index);
+        let (filter, expression) = match order_expression {
+            OrderExpression::Asc(e) => (nemo_filter!("", other_val, " <= ", val, ""), e),
+            OrderExpression::Desc(e) => (nemo_filter!("", other_val, " >= ", val, ""), e),
+        };
+
+        let expression_solution = self.translate_expression(expression, inner)?;
+        nemo_def!(sort_condition(?i, ??both, ??depend; @result: ?r) :- inner(@index: ?i; ??both, ??depend), expression_solution(??depend; @result: ?r); SolutionExpression);
+        nemo_def!(sorted_proto(@index: %count(other_index); ??vars) :- sort_condition(?i, ??vars; @result: val), sort_condition(other_index, ??*other_vars; @result: other_val), {filter}; SolutionSequence);
+
+        let index_filter = nemo_filter!("", other_index, " >= ", index, "");
+        nemo_def!(sorted_ties(@index: %count(other_index); ??vars) :- sort_condition(index, ??vars; @result: ?r), sort_condition(other_index, ??*other_vars; @result: ?r), {index_filter}; SolutionSequence);
+        nemo_def!(sorted(@index: index.clone() - other_index.clone(); ??vars) :- sorted_proto(@index: index; ??vars), sorted_ties(@index: other_index; ??vars); SolutionSequence);
+        Ok(sorted)
+    }
+
+    fn translate_order_by_seq(&mut self, inner: &SolutionSequence, expressions: &Vec<OrderExpression>) -> Result<SolutionSequence, TranslateError> {
+        let mut solution = inner.clone();
+        for expression in expressions.iter().rev() {
+            solution = self.translate_sort(&solution, expression)?;
+        }
+        Ok(solution)
+    }
+
     fn get_multi(&mut self, inner: &SolutionSet) -> SolutionMultiSet {
         nemo_def!(multi(@count: 1; ??vars) :- inner(??vars); SolutionMultiSet);
         multi
@@ -1015,7 +1044,10 @@ impl QueryTranslator {
             //GraphPattern::Extend {inner, variable, expression} => {},
             //Minus
             //Values
-            //GraphPattern::OrderBy {inner, expression} => self.translate_order_by_seq(inner, expression),
+            GraphPattern::OrderBy {inner, expression} => {
+                let inner_solution = self.translate_pattern_seq(inner)?;
+                self.translate_order_by_seq(&inner_solution, expression)
+            },
             GraphPattern::Project {inner, variables} => {
                 let inner_solution = self.translate_pattern_seq(inner)?;
                 self.translate_project_seq(&inner_solution, variables)

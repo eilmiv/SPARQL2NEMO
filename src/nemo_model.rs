@@ -1005,19 +1005,31 @@ impl ProtoBinding {
         }
     }
 
-    fn resolve(&self, set_variables: &HashMap<String, Vec<VarPtr>>) -> Vec<ProtoBinding> {
+    fn resolve(&self, set_variables: &HashMap<String, Vec<VarPtr>>, rename_set_variables: Option<&HashMap<String, Vec<VarPtr>>>) -> Vec<ProtoBinding> {
         match self {
             ProtoBinding::Binding(_) | ProtoBinding::NamedConnection(_)  => vec![self.clone()],
             ProtoBinding::Aggregate(name, sub_bindings) => {
                 vec![ProtoBinding::Aggregate(
                     name.clone(),
                     sub_bindings.iter()
-                        .map(|b| b.resolve(set_variables))
+                        .map(|b| b.resolve(set_variables, rename_set_variables))
                         .flatten()
                         .collect()
                 )]
             },
-            ProtoBinding::RenameSet(_) => panic!("Rename set only allowed in body atoms directly."),
+            ProtoBinding::RenameSet(s) => {
+                match rename_set_variables {
+                    None => panic!("Rename set not allowed in this position."),
+                    Some(translation) => {
+                        let vars = translation.get(s).expect(&format!("Rename-set {s} not bound"));
+                        let mut resolved_bindings = Vec::new();
+                        for v in hash_dedup(vars) {
+                            resolved_bindings.push(ProtoBinding::Binding(Binding::Variable(v)))
+                        }
+                        resolved_bindings
+                    }
+                }
+            },
             ProtoBinding::VariableSet(s) => {
                 let vars = set_variables.get(s).expect(&format!("Var set {s} not bound"));
                 let mut resolved_bindings = Vec::new();
@@ -1270,7 +1282,7 @@ impl RuleBuilder {
     fn resolve_variable_sets(&self) -> (Vec<ProtoBinding>, Vec<ProtoPredicate>){
         let mut var_predicates: HashMap<VarPtr, u64> = HashMap::new();
         let mut set_predicates: HashMap<String, u64> = HashMap::new();
-        let mut predicates_with_rename_set: HashSet<PredicatePtr> = HashSet::new();
+        let mut predicates_with_rename_set: HashSet<usize> = HashSet::new();
 
         // compute which predicate contains which variables and var set bindings
         // handle head
@@ -1295,14 +1307,6 @@ impl RuleBuilder {
             let flag: u64 = { 2u64 }.checked_pow((i + 1) as u32).expect("long predicate lists are not supported");
             match proto_predicate {
                 ProtoPredicate::Explicit(predicate, bindings, _negated) => {
-                    // set vars vor this predicate
-                    let predicate_vars = predicate.vars();
-                    let (_start, middle_vars, _end) = binding_parts(bindings, &predicate_vars);
-                    for var in middle_vars {
-                        let current_predicates = *var_predicates.get(var).unwrap_or(&0);
-                        var_predicates.insert(var.clone(), current_predicates | flag);
-                    }
-
                     // check for rename set
                     let mut has_rename_set = false;
                     for proto_binding in bindings{
@@ -1311,21 +1315,29 @@ impl RuleBuilder {
                             _ => {}
                         }
                     }
+                    if has_rename_set {
+                        predicates_with_rename_set.insert(i);
+                        continue;
+                        // predicates with rename set don't provide information which variable goes into which set because the variable could be part of the rename set
+                    }
+
+                    // set vars vor this predicate
+                    let predicate_vars = predicate.vars();
+                    let (_start, middle_vars, _end) = binding_parts(bindings, &predicate_vars);
+                    for var in middle_vars {
+                        let current_predicates = *var_predicates.get(var).unwrap_or(&0);
+                        var_predicates.insert(var.clone(), current_predicates | flag);
+                    }
 
                     // set var sets for this predicate
-                    if !has_rename_set {
-                        for proto_binding in bindings{
-                            match proto_binding {
-                                ProtoBinding::VariableSet(s) => {
-                                    let current_predicates = *set_predicates.get(s).unwrap_or(&0);
-                                    set_predicates.insert(s.clone(), current_predicates | flag);
-                                }
-                                _ => {}
+                    for proto_binding in bindings{
+                        match proto_binding {
+                            ProtoBinding::VariableSet(s) => {
+                                let current_predicates = *set_predicates.get(s).unwrap_or(&0);
+                                set_predicates.insert(s.clone(), current_predicates | flag);
                             }
+                            _ => {}
                         }
-                    }
-                    else {
-                        predicates_with_rename_set.insert(predicate.clone());
                     }
                 },
                 ProtoPredicate::Special(prefix, bindings) => {
@@ -1336,10 +1348,14 @@ impl RuleBuilder {
         }
         let set_index: HashMap<_, _> = set_predicates.into_iter().map(|(k, v)| (v, k)).collect();
 
-        // Resolve variable and rename sets in body
+        // Resolve variable sets in body
         let mut new_body: Vec<ProtoPredicate> = Vec::new();
         let mut set_variables: HashMap<String, Vec<VarPtr>> = HashMap::new();
-        for proto_predicate in self.body.iter(){
+        for (i, proto_predicate) in self.body.iter().enumerate() {
+            if predicates_with_rename_set.contains(&i) {
+                // predicates with rename sets don't determine which variable belongs to which set (act like the head for `nemo_def!`) and are handled later
+                continue;
+            }
             match proto_predicate {
                 ProtoPredicate::Explicit(predicate, bindings, negated) => {
                     let predicate_vars = predicate.vars();
@@ -1348,10 +1364,11 @@ impl RuleBuilder {
                     new_bindings.extend(start.iter().cloned());
                     for var in middle_vars {
                         let predicates = *var_predicates.get(var).expect("predicates for var not computed.");
-                        let matched = set_index.get(&predicates).is_some();
-                        let allow_unmatched = predicates_with_rename_set.contains(predicate);
-                        if !(matched || allow_unmatched) {
-                            // construct error message
+                        if let Some(var_set) = set_index.get(&predicates) {
+                            new_bindings.push(ProtoBinding::Binding(Binding::Variable(var.clone())));
+                            set_variables.entry(var_set.clone()).or_insert_with(Vec::new).push(var.clone());
+                        } else {
+                            // construct error message and panic
                             let flags = *var_predicates.get(var).unwrap();
                             let mut predicates: Vec<String> = Vec::new();
                             if flags & 1 > 0 {predicates.push("RULE_HEAD".to_string())}
@@ -1385,15 +1402,6 @@ impl RuleBuilder {
                             }
                             panic!("var {var} in {} could not be bound to any var set; predicates: {} \nflags: {:#b} \navailable: \n{}\n", predicate.label(), predicates.join(", "), flags, available)
                         }
-                        if matched {
-                            new_bindings.push(ProtoBinding::Binding(Binding::Variable(var.clone())))
-                        }
-                        else {
-                            new_bindings.push(ProtoBinding::Binding(Binding::Variable(var.distinct_new())))
-                        }
-                        if let Some(var_set) = set_index.get(&predicates){
-                            set_variables.entry(var_set.clone()).or_insert_with(Vec::new).push(var.clone());
-                        }
                     }
                     // ensure also empty variable sets exist (var sets that don't exist raise error when resolving head)
                     for var_set in variable_sets(bindings) {
@@ -1414,13 +1422,57 @@ impl RuleBuilder {
             }
         }
 
+        // resolve and rename sets in body
+        let mut rename_set_variables: HashMap<String, Vec<VarPtr>> = HashMap::new();
+        for (i, proto_predicate) in self.body.iter().enumerate() {
+            if !predicates_with_rename_set.contains(&i) {
+                // predicates without rename sets are already handled
+                continue;
+            }
+            match proto_predicate {
+                ProtoPredicate::Explicit(predicate, bindings, negated) => {
+                    let mut my_var_sets: Vec<String> = Vec::new();
+                    let mut my_rename_set: Option<String> = None;
+                    for binding in bindings {
+                        match binding {
+                            ProtoBinding::VariableSet(s) => my_var_sets.push(s.clone()),
+                            ProtoBinding::RenameSet(s) => {my_rename_set = Some(s.clone())}
+                            _ => {}
+                        }
+                    }
+                    let my_rename_set = my_rename_set.expect("predicate with rename set must by definition have a rename set");
+
+                    let predicate_vars = predicate.vars();
+                    let (start, middle_vars, end) = binding_parts(bindings, &predicate_vars);
+                    let mut new_bindings: Vec<ProtoBinding> = Vec::new();
+                    new_bindings.extend(start.iter().cloned());
+                    for var in middle_vars {
+                        let predicates = var_predicates.get(var);
+                        let var_set = predicates
+                            .map(|p| set_index.get(&p).expect("if variable occurs also in some predicate without rename set, it should be in some var set"));
+                        let matched = var_set.filter(|var_set| my_var_sets.contains(var_set)).is_some();
+                        if matched {
+                            new_bindings.push(ProtoBinding::Binding(Binding::Variable(var.clone())))
+                        }
+                        else {
+                            new_bindings.push(ProtoBinding::Binding(Binding::Variable(var.distinct_new())));
+                            rename_set_variables.entry(my_rename_set.clone()).or_insert_with(Vec::new).push(var.clone());
+                        }
+                    }
+                    new_bindings.extend(end.iter().cloned());
+                    new_body.push(ProtoPredicate::Explicit(predicate.clone(), new_bindings, *negated))
+                },
+                ProtoPredicate::Special(_, _) => panic!("rename sets can only occur in explicit proto predicates and not in filters")
+            }
+        }
+
         // resolve head
         let mut new_head: Vec<ProtoBinding> = Vec::new();
         if let Some(target) = &self.target_predicate {
             let predicate_vars = target.vars();
             let (start, middle_vars, end) = binding_parts(&self.head, &predicate_vars);
             new_head.extend(
-                start.iter().cloned().map(|proto_binding| proto_binding.resolve(&set_variables)).flatten()
+                start.iter().cloned().map(|proto_binding| proto_binding.resolve(&set_variables, None)).flatten()
             );
             for var in middle_vars {
                 let predicates = *var_predicates.get(var).expect("predicates for var in head not computed.");
@@ -1432,11 +1484,11 @@ impl RuleBuilder {
                 }
             }
             new_head.extend(
-                end.iter().cloned().map(|proto_binding| proto_binding.resolve(&set_variables)).flatten()
+                end.iter().cloned().map(|proto_binding| proto_binding.resolve(&set_variables, None)).flatten()
             );
         } else {
             new_head.extend(
-                self.head.iter().map(|binding| binding.resolve(&set_variables)).flatten()
+                self.head.iter().map(|binding| binding.resolve(&set_variables, Some(&rename_set_variables))).flatten()
             );
         }
 
