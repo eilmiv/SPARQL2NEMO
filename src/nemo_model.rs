@@ -787,6 +787,7 @@ pub trait TypedPredicate: Debug {
     fn create_dummy() -> Self where Self: Sized;
     fn get_predicate(&self) -> PredicatePtr;
     fn clone(&self) -> Self where Self: Sized;
+    fn add_optional_named_binding(&self, name: &str) -> Box<dyn Fn(&mut RuleBuilder, ProtoBinding) + '_>;
 }
 
 pub fn add_fact(p: &dyn TypedPredicate, fact: Fact){
@@ -835,6 +836,10 @@ impl TypedPredicate for Basic {
     fn clone(&self) -> Self where Self: Sized {
         Basic {inner: self.inner.clone()}
     }
+
+    fn add_optional_named_binding(&self, name: &str) -> Box<dyn Fn (&mut RuleBuilder, ProtoBinding) + '_> {
+        Box::new(|builder, binding| {})
+    }
 }
 
 impl From<&Basic> for ProtoPredicate {
@@ -871,6 +876,13 @@ impl TypedPredicate for WithMultiplicity {
 
     fn clone(&self) -> Self where Self: Sized {
         WithMultiplicity{inner: self.inner.clone()}
+    }
+
+    fn add_optional_named_binding(&self, name: &str) -> Box<dyn Fn(&mut RuleBuilder, ProtoBinding) + '_> {
+        match name {
+            "count" => Box::new(|builder, binding| self.count(builder, binding)),
+            _ => Box::new(|builder, binding| {})
+        }
     }
 }
 
@@ -927,6 +939,18 @@ macro_rules! nemo_predicate_type {
 
             fn clone(&self) -> Self where Self: Sized {
                 $type_name{inner: self.inner.clone()}
+            }
+
+            fn add_optional_named_binding(&self, name: &str) -> Box<dyn Fn(&mut crate::nemo_model::RuleBuilder, crate::nemo_model::ProtoBinding) + '_> {
+                match name {
+                    $(
+                        stringify!(pos_front) => Box::new(|builder, binding| self.$pos_front(builder, binding)),
+                    )*
+                    $(
+                        stringify!(pos_back) => Box::new(|builder, binding| self.$pos_back(builder, binding)),
+                    )*
+                    _ => Box::new(|builder, binding| {})
+                }
             }
         }
 
@@ -1551,7 +1575,7 @@ macro_rules! nemo_def {
         $head_name:ident(
             $(
                 $(
-                    @$head_key_front:ident:
+                    $(@$head_key_front:ident)?$(@?$head_key_front_optional:ident)?:
                         $(?$head_connection_name_front:ident)?
                         $(%$head_aggregate_front:ident(
                             $(
@@ -1579,7 +1603,7 @@ macro_rules! nemo_def {
 
             $(
                 ;$(
-                    @$head_key_back:ident:
+                    $(@$head_key_back:ident)?$(@?$head_key_back_optional:ident)?:
                         $(?$head_connection_name_back:ident)?
                         $(%$head_aggregate_back:ident(
                             $(
@@ -1597,7 +1621,7 @@ macro_rules! nemo_def {
                 $body_predicate:ident(
                     $(
                         $(
-                            @$body_key_front:ident:
+                            $(@$body_key_front:ident)?$(@?$body_key_front_optional:ident)?:
                                 $(?$body_connection_name_front:ident)?
                                 $($body_expression_front:expr)?
                         ),+;
@@ -1610,7 +1634,7 @@ macro_rules! nemo_def {
                     ),*
                     $(
                          ;$(
-                            @$body_key_back:ident:
+                            $(@$body_key_back:ident)?$(@?$body_key_back_optional:ident)?:
                                 $(?$body_connection_name_back:ident)?
                                 $($body_expression_back:expr)?
                         ),+
@@ -1621,7 +1645,7 @@ macro_rules! nemo_def {
                 ~$negated_body_predicate:ident(
                     $(
                         $(
-                            @$negated_body_key_front:ident:
+                            $(@$negated_body_key_front:ident)?$(@?$negated_body_key_front_optional:ident)?:
                                 $(?$negated_body_connection_name_front:ident)?
                                 $($negated_body_expression_front:expr)?
                         ),+;
@@ -1634,7 +1658,7 @@ macro_rules! nemo_def {
                     ),*
                     $(
                          ;$(
-                            @$negated_body_key_back:ident:
+                            $(@$negated_body_key_back:ident)?$(@?$negated_body_key_back_optional:ident)?:
                                 $(?$negated_body_connection_name_back:ident)?
                                 $($negated_body_expression_back:expr)?
                         ),+
@@ -1659,7 +1683,7 @@ macro_rules! nemo_def {
         // head-front
         $(
             $(
-                head_predicate.$head_key_front(
+                head_predicate.$( $head_key_front )?$( add_optional_named_binding(stringify!($head_key_front_optional)) )?(
                     &mut builder,
                     $(
                         crate::nemo_model::ProtoBinding::NamedConnection(
@@ -1743,7 +1767,7 @@ macro_rules! nemo_def {
         // head-back
         $(
             $(
-                head_predicate.$head_key_back(
+                head_predicate.$($head_key_back)?$( add_optional_named_binding(stringify!($head_key_back_optional)) )?(
                     &mut builder,
                     $(
                         crate::nemo_model::ProtoBinding::NamedConnection(
@@ -1789,7 +1813,7 @@ macro_rules! nemo_def {
                 // attom front
                 $(
                     $(
-                        {&$body_predicate}.$body_key_front(
+                        {&$body_predicate}.$($body_key_front)?$( add_optional_named_binding(stringify!($body_key_front_optional)) )?(
                             &mut builder,
                             $(
                                 crate::nemo_model::ProtoBinding::NamedConnection(
@@ -1834,7 +1858,7 @@ macro_rules! nemo_def {
                 // attom back
                 $(
                     $(
-                        {&$body_predicate}.$body_key_back(
+                        {&$body_predicate}.$($body_key_back)?$( add_optional_named_binding(stringify!($body_key_back_optional)) )?(
                             &mut builder,
                             $(
                                 crate::nemo_model::ProtoBinding::NamedConnection(
@@ -1859,7 +1883,7 @@ macro_rules! nemo_def {
                 // attom front
                 $(
                     $(
-                        {&$negated_body_predicate}.$negated_body_key_front(
+                        {&$negated_body_predicate}.$($negated_body_key_front)?$( add_optional_named_binding(stringify!($negated_body_key_front_optional)) )?(
                             &mut builder,
                             $(
                                 crate::nemo_model::ProtoBinding::NamedConnection(
@@ -1904,7 +1928,7 @@ macro_rules! nemo_def {
                 // attom back
                 $(
                     $(
-                        {&$negated_body_predicate}.$negated_body_key_back(
+                        {&$negated_body_predicate}.$($negated_body_key_back)?$( add_optional_named_binding(stringify!($negated_body_key_back_optional)) )?(
                             &mut builder,
                             $(
                                 crate::nemo_model::ProtoBinding::NamedConnection(
@@ -1955,7 +1979,7 @@ macro_rules! nemo_add {
         $head_name:ident(
             $(
                 $(
-                    @$head_key_front:ident:
+                    $(@$head_key_front:ident)?$(@?$head_key_front_optional:ident)?:
                         $(?$head_connection_name_front:ident)?
                         $(%$head_aggregate_front:ident(
                             $(
@@ -1983,7 +2007,7 @@ macro_rules! nemo_add {
 
             $(
                 ;$(
-                    @$head_key_back:ident:
+                    $(@$head_key_back:ident)?$(@?$head_key_back_optional:ident)?:
                         $(?$head_connection_name_back:ident)?
                         $(%$head_aggregate_back:ident(
                             $(
@@ -2001,7 +2025,7 @@ macro_rules! nemo_add {
                 $body_predicate:ident(
                     $(
                         $(
-                            @$body_key_front:ident:
+                            $(@$body_key_front:ident)?$(@?$body_key_front_optional:ident)?:
                                 $(?$body_connection_name_front:ident)?
                                 $($body_expression_front:expr)?
                         ),+;
@@ -2014,7 +2038,7 @@ macro_rules! nemo_add {
                     ),*
                     $(
                          ;$(
-                            @$body_key_back:ident:
+                            $(@$body_key_back:ident)?$(@?$body_key_back_optional:ident)?:
                                 $(?$body_connection_name_back:ident)?
                                 $($body_expression_back:expr)?
                         ),+
@@ -2025,7 +2049,7 @@ macro_rules! nemo_add {
                 ~$negated_body_predicate:ident(
                     $(
                         $(
-                            @$negated_body_key_front:ident:
+                            $(@$negated_body_key_front:ident)?$(@?$negated_body_key_front_optional:ident)?:
                                 $(?$negated_body_connection_name_front:ident)?
                                 $($negated_body_expression_front:expr)?
                         ),+;
@@ -2038,7 +2062,7 @@ macro_rules! nemo_add {
                     ),*
                     $(
                          ;$(
-                            @$negated_body_key_back:ident:
+                            $(@$negated_body_key_back:ident)?$(@?$negated_body_key_back_optional:ident)?:
                                 $(?$negated_body_connection_name_back:ident)?
                                 $($negated_body_expression_back:expr)?
                         ),+
@@ -2063,7 +2087,7 @@ macro_rules! nemo_add {
         // head-front
         $(
             $(
-                head_predicate.$head_key_front(
+                head_predicate.$( $head_key_front )?$( add_optional_named_binding(stringify!($head_key_front_optional)) )?(
                     &mut builder,
                     $(
                         crate::nemo_model::ProtoBinding::NamedConnection(
@@ -2147,7 +2171,7 @@ macro_rules! nemo_add {
         // head-back
         $(
             $(
-                head_predicate.$head_key_back(
+                head_predicate.$($head_key_back)?$( add_optional_named_binding(stringify!($head_key_back_optional)) )?(
                     &mut builder,
                     $(
                         crate::nemo_model::ProtoBinding::NamedConnection(
@@ -2193,7 +2217,7 @@ macro_rules! nemo_add {
                 // attom front
                 $(
                     $(
-                        {&$body_predicate}.$body_key_front(
+                        {&$body_predicate}.$($body_key_front)?$( add_optional_named_binding(stringify!($body_key_front_optional)) )?(
                             &mut builder,
                             $(
                                 crate::nemo_model::ProtoBinding::NamedConnection(
@@ -2238,7 +2262,7 @@ macro_rules! nemo_add {
                 // attom back
                 $(
                     $(
-                        {&$body_predicate}.$body_key_back(
+                        {&$body_predicate}.$($body_key_back)?$( add_optional_named_binding(stringify!($body_key_back_optional)) )?(
                             &mut builder,
                             $(
                                 crate::nemo_model::ProtoBinding::NamedConnection(
@@ -2263,7 +2287,7 @@ macro_rules! nemo_add {
                 // attom front
                 $(
                     $(
-                        {&$negated_body_predicate}.$negated_body_key_front(
+                        {&$negated_body_predicate}.$($negated_body_key_front)?$( add_optional_named_binding(stringify!($negated_body_key_front_optional)) )?(
                             &mut builder,
                             $(
                                 crate::nemo_model::ProtoBinding::NamedConnection(
@@ -2308,7 +2332,7 @@ macro_rules! nemo_add {
                 // attom back
                 $(
                     $(
-                        {&$negated_body_predicate}.$negated_body_key_back(
+                        {&$negated_body_predicate}.$($negated_body_key_back)?$( add_optional_named_binding(stringify!($negated_body_key_back_optional)) )?(
                             &mut builder,
                             $(
                                 crate::nemo_model::ProtoBinding::NamedConnection(
