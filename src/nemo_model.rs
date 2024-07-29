@@ -108,6 +108,12 @@ impl Clone for TermSet {
     }
 }
 
+impl From<&TermSet> for TermSet {
+    fn from(value: &TermSet) -> Self {
+        value.clone()
+    }
+}
+
 impl<T> From<T> for TermSet where Binding: From<T> {
     fn from(value: T) -> Self {
         TermSet::from_bindings(&vec![Binding::from(value)])
@@ -1058,10 +1064,10 @@ macro_rules! nemo_predicate_type {
             fn add_optional_named_binding(&self, name: &str) -> Box<dyn Fn(&mut crate::nemo_model::RuleBuilder, crate::nemo_model::ProtoBinding) + '_> {
                 match name {
                     $(
-                        stringify!(pos_front) => Box::new(|builder, binding| self.$pos_front(builder, binding)),
+                        stringify!($pos_front) => Box::new(|builder, binding| self.$pos_front(builder, binding)),
                     )*
                     $(
-                        stringify!(pos_back) => Box::new(|builder, binding| self.$pos_back(builder, binding)),
+                        stringify!($pos_back) => Box::new(|builder, binding| self.$pos_back(builder, binding)),
                     )*
                     _ => Box::new(|builder, binding| {})
                 }
@@ -1297,6 +1303,18 @@ impl From<&dyn TypedPredicate> for ProtoPredicate {
                 .collect(),
             false
         )
+    }
+}
+
+impl<T: TypedPredicate> From<&Vec<T>> for ProtoPredicate {
+    fn from(value: &Vec<T>) -> Self {
+        ProtoPredicate::Multi(value.iter().map(|p| ProtoPredicate::from(p as &dyn TypedPredicate)).collect())
+    }
+}
+
+impl From<&BoundPredicate> for ProtoPredicate {
+    fn from(value: &BoundPredicate) -> Self {
+        ProtoPredicate::Explicit(value.predicate.clone(), value.bindings.iter().map(ProtoBinding::from).collect(), value.negated)
     }
 }
 
@@ -1718,6 +1736,12 @@ impl RuleBuilder {
             head.push(proto_binding.to_binding(None, &mut name_lookup))
         }
 
+        if predicates.is_empty() {
+            let dummy = Basic::create("dummy", vec![]);
+            add_fact(&dummy, Fact::new(vec![]));
+            predicates.push(BoundPredicate::new(dummy.get_predicate(), vec![], false));
+        }
+
         Rule::new(head, predicates, filters)
     }
 
@@ -1851,18 +1875,19 @@ macro_rules! nemo_def {
             )?
             $($atom_expression:block)?
             $(~$negated_atom_expression:block)?
-        ),+; $predicate_type:ty
+        ),+; $predicate_type:ty $(; $predicate_name:expr)?
     ) => {
         let mut builder = crate::nemo_model::RuleBuilder::new();
         let head_predicate = <$predicate_type>::create_dummy();
+
+        builder.set_property_name(stringify!($head_name));
+        $(builder.set_property_name($predicate_name);)?
         /*
         This block is duplicated also at nemo_add.
 
         The reason for this is that IDE support when calling nested macros is limited.
         ----- DUPLICATED BLOCK -----
          */
-        builder.set_property_name(stringify!($head_name));
-
         // HEAD
         // head-front
         $(
@@ -2235,14 +2260,13 @@ macro_rules! nemo_add {
     ) => {
         let mut builder = crate::nemo_model::RuleBuilder::new_for({&$head_name}.get_predicate());
         let head_predicate = {&$head_name};
+        builder.set_property_name(stringify!($head_name));
         /*
         This block is duplicated also at nemo_def.
 
         The reason for this is that IDE support when calling nested macros is limited.
         ----- DUPLICATED BLOCK -----
          */
-        builder.set_property_name(stringify!($head_name));
-
         // HEAD
         // head-front
         $(
