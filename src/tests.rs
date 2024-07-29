@@ -5,7 +5,7 @@ use nemo::execution::{DefaultExecutionEngine, ExecutionEngine};
 use nemo::io::ImportManager;
 use nemo::io::parser::parse_program;
 use nemo::io::resource_providers::ResourceProviders;
-use crate::translation_next::translate;
+use crate::translation::translate;
 
 fn execute_nemo(program_string: String) -> Result<Vec<Vec<AnyDataValue>>, Error> {
     println!("{}", program_string);

@@ -1,17 +1,17 @@
 # SPARQL2NEMO Converter
 Transforms a given [SPARQL query](https://www.w3.org/TR/sparql11-query/) to [NEMO](https://github.com/knowsys/nemo) code. 
 The program works by transforming operations of the SPARQL algebra recursively. 
-Translation to SPARQL algebra uses [spargebra](https://docs.rs/spargebra/latest/spargebra/) which is developed for the 
+Translation to SPARQL algebra uses [spargebra](https://docs.rs/spargebra/latest/spargebra/) which is developed as part of the 
 [oxigraph](https://docs.rs/oxigraph/latest/oxigraph/) graph database.
 
 ## Supported Features
-Currently supported features can be found in [translation.rs](src/translation.rs). 
-A different version of the translation using the "nemo in rust" macros can be found in [translation_next.rs](src/translation_next.rs).
+Currently supported features can be found in [translation.rs](src/translation.rs).
 Functions are generally named after the SPARQL algebra operation they translate. 
 
 There are special suffixes for functions that do not produce solution sets:
 - `*_seq` for solution sequence: first position of resulting predicate is index in solution sequence
 - `*_multi` for solution multiset (a.k.a. unordered solution sequence): first position of resulting predicate is multiplicity
+- `*_g` for generic implementations supporting multiple types of solutions
 
 There are currently many known issues with the existing implementations. 
 

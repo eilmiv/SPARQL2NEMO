@@ -1,10 +1,9 @@
 mod basic_solutions;
 mod error;
 mod state;
-mod translation;
 mod solution;
 mod nemo_model;
-mod translation_next;
+mod translation;
 
 #[cfg(test)]
 mod tests;
