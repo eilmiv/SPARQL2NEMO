@@ -50,6 +50,103 @@ macro_rules! nemo_iri {
     ($prefix:expr => $suffix:literal) => {crate::nemo_model::Binding::Constant(format!("<{}{}>", $prefix, $suffix))};
 }
 
+pub struct TermSet {
+    variables: Vec<VarPtr>,
+    binding_map: HashMap<VarPtr, Binding>
+}
+
+impl TermSet {
+    pub fn new() -> Self {
+        TermSet{variables: Vec::new(), binding_map: HashMap::new()}
+    }
+
+    pub fn from_vars(variables: &Vec<VarPtr>) -> Self {
+        let mut term_set = Self::new();
+        for v in variables {term_set.add_var(v)}
+        term_set
+    }
+
+    pub fn from_bindings(bindings: &Vec<Binding>) -> Self {
+        let mut term_set = Self::new();
+        for v in bindings {term_set.add_binding(v)}
+        term_set
+    }
+
+    pub fn add_var(&mut self, var: &VarPtr) {
+        self.variables.push(var.clone())
+    }
+
+    pub fn add_binding(&mut self, binding: &Binding){
+        let v = binding.variable();
+        self.add_var(&v);
+        self.binding_map.insert(v, binding.clone());
+    }
+
+    pub fn extend(&mut self, other: &TermSet){
+        for binding in other.bindings() {
+            self.add_binding(&binding);
+        }
+    }
+
+    pub fn vars(&self) -> Vec<VarPtr> {
+        hash_dedup(&self.variables)
+    }
+
+    pub fn bindings(&self) -> Vec<Binding> {
+        self.vars().iter()
+            .map(|v| self.binding_map.get(v).unwrap_or(&Binding::from(v)).clone())
+            .collect()
+    }
+}
+
+impl Clone for TermSet {
+    fn clone(&self) -> Self {
+        TermSet{
+            variables: self.variables.iter().map(|v| v.clone()).collect(),
+            binding_map: self.binding_map.iter().map(|(v, b)| (v.clone(), b.clone())).collect()
+        }
+    }
+}
+
+impl<T> From<T> for TermSet where Binding: From<T> {
+    fn from(value: T) -> Self {
+        TermSet::from_bindings(&vec![Binding::from(value)])
+    }
+}
+
+impl<T> From<Vec<T>> for TermSet where Binding: From<T> {
+    fn from(value: Vec<T>) -> Self {
+        let bindings: Vec<Binding> = value.into_iter().map(Binding::from).collect();
+        TermSet::from_bindings(&bindings)
+    }
+}
+
+impl<T> From<&Vec<T>> for TermSet where Binding: for<'a> From<&'a T> {
+    fn from(value: &Vec<T>) -> Self {
+        let bindings: Vec<Binding> = value.into_iter().map(|v: &T| Binding::from(v)).collect();
+        TermSet::from_bindings(&bindings)
+    }
+}
+
+macro_rules! nemo_terms {
+    ($($part:expr $(=> $func:expr)? ),*) => {
+        {
+            let mut term_set = crate::nemo_model::TermSet::new();
+            $(
+                let to_add = vec![$part];
+                $(
+                    let to_add: Vec<crate::nemo_model::TermSet> = ($part).iter().map($func).map(crate::nemo_model::TermSet::from).collect();
+                )?
+
+                for part in to_add {
+                    term_set.extend(&crate::nemo_model::TermSet::from(part));
+                }
+            )*
+            term_set
+        }
+    };
+}
+
 #[derive(Debug)]
 pub struct VarPtr {
     ptr: Rc<Variable>
@@ -444,6 +541,23 @@ macro_rules! nemo_filter {
                 $(( crate::nemo_model::ProtoBinding::NamedConnection(stringify!($var).to_string()) , $var_suffix.to_string() ))?
                 $(( crate::nemo_model::ProtoBinding::Binding(crate::nemo_model::Binding::from(&$expr)) , $expr_suffix.to_string() ))?
             ),*
+        ])
+    };
+}
+
+macro_rules! nemo_condition {
+    ($(?$first_var:ident)?$($first:expr)?, $sep:expr, $(?$second_var:ident)?$($second:expr)?) => {
+        crate::nemo_model::ProtoPredicate::Special("".to_string(), vec![
+            (
+                $(( crate::nemo_model::ProtoBinding::NamedConnection(stringify!($first_var).to_string())))?
+                $(( crate::nemo_model::ProtoBinding::Binding(crate::nemo_model::Binding::from(&$first))))?
+                , ($sep).to_string()
+            ),
+            (
+                $(( crate::nemo_model::ProtoBinding::NamedConnection(stringify!($second_var).to_string())))?
+                $(( crate::nemo_model::ProtoBinding::Binding(crate::nemo_model::Binding::from(&$second))))?
+                , "".to_string()
+            )
         ])
     };
 }
@@ -1002,6 +1116,7 @@ pub enum ProtoBinding {
     VariableSet(String),
     RenameSet(String),
     Aggregate(String, Vec<ProtoBinding>),
+    BindingList(Vec<Binding>),
 }
 
 impl ProtoBinding {
@@ -1020,6 +1135,7 @@ impl ProtoBinding {
             },
             ProtoBinding::VariableSet(s) => panic!("VariableSet \"{s}\" not resolved."),
             ProtoBinding::RenameSet(s) => panic!("RenameSet \"{s}\" not resolved."),
+            ProtoBinding::BindingList(l) => panic!("BindingList not resolved."),
             ProtoBinding::Aggregate(name, sub_bindings) => {
                 Binding::Call(Call::new(
                     &format!("#{name}"),
@@ -1061,8 +1177,33 @@ impl ProtoBinding {
                      resolved_bindings.push(ProtoBinding::Binding(Binding::Variable(v)))
                 }
                 resolved_bindings
+            },
+            ProtoBinding::BindingList(l) => {
+                let mut resolved_bindings = Vec::new();
+                for b in l {
+                    resolved_bindings.push(ProtoBinding::Binding(b.clone()))
+                }
+                resolved_bindings
             }
         }
+    }
+}
+
+impl<T> From<T> for ProtoBinding where Binding: From<T> {
+    fn from(value: T) -> Self {
+        ProtoBinding::Binding(Binding::from(value))
+    }
+}
+
+impl From<TermSet> for ProtoBinding {
+    fn from(value: TermSet) -> Self {
+        ProtoBinding::BindingList(value.bindings())
+    }
+}
+
+impl From<&TermSet> for ProtoBinding {
+    fn from(value: &TermSet) -> Self {
+        ProtoBinding::BindingList(value.bindings())
     }
 }
 
@@ -1070,6 +1211,7 @@ impl ProtoBinding {
 pub enum ProtoPredicate {
     Explicit(PredicatePtr, Vec<ProtoBinding>, bool),
     Special(String, Vec<(ProtoBinding, String)>),
+    Multi(Vec<ProtoPredicate>),
 }
 
 impl ProtoPredicate {
@@ -1104,6 +1246,29 @@ impl ProtoPredicate {
                         ).collect()
                     )
                 )
+            },
+            ProtoPredicate::Multi(sub) => {
+                for s in sub {
+                    s.compile(variables, predicates, filters);
+                }
+            }
+        }
+    }
+
+    fn flat_clone(&self) -> Vec<ProtoPredicate> {
+        match self {
+            ProtoPredicate::Explicit(head, body, negated) => vec![
+                ProtoPredicate::Explicit(head.clone(), body.clone(), *negated)
+            ],
+            ProtoPredicate::Special(prefix, suffixes) => vec![
+                ProtoPredicate::Special(prefix.clone(), suffixes.clone())
+            ],
+            ProtoPredicate::Multi(sub) => {
+                let mut result = Vec::new();
+                for s in sub {
+                    result.extend(s.flat_clone())
+                }
+                result
             }
         }
     }
@@ -1135,20 +1300,30 @@ impl From<&dyn TypedPredicate> for ProtoPredicate {
     }
 }
 
+macro_rules! nemo_atoms {
+    ($($atom:expr),*) => {crate::nemo_model::ProtoPredicate::Multi(vec![
+        $(crate::nemo_model::ProtoPredicate::from($atom)),*
+    ])};
+}
+
 fn binding_parts<'a, 'b>(proto_bindings: &'a Vec<ProtoBinding>, vars: &'b Vec<VarPtr>) -> (&'a [ProtoBinding], &'b [VarPtr], &'a [ProtoBinding]) {
     let mut start_len = 0;
+    let mut total_start_len = 0;
     let mut end_len = 0;
+    let mut total_end_len = 0;
     let mut in_start = true;
 
     for b in proto_bindings {
         if in_start {
             match b {
-                ProtoBinding::Binding(_) | ProtoBinding::NamedConnection(_) | ProtoBinding::Aggregate(_, _) => start_len += 1,
+                ProtoBinding::Binding(_) | ProtoBinding::NamedConnection(_) | ProtoBinding::Aggregate(_, _) => {start_len += 1; total_start_len += 1},
+                ProtoBinding::BindingList(l) => {start_len += 1; total_start_len += l.len()},
                 ProtoBinding::VariableSet(_) | ProtoBinding::RenameSet(_) => in_start = false
             }
         } else {
             match b {
-                ProtoBinding::Binding(_) | ProtoBinding::NamedConnection(_) | ProtoBinding::Aggregate(_, _) => end_len += 1,
+                ProtoBinding::Binding(_) | ProtoBinding::NamedConnection(_) | ProtoBinding::Aggregate(_, _) => {end_len += 1; total_end_len += 1},
+                ProtoBinding::BindingList(l) => {end_len += 1; total_end_len += l.len()},
                 ProtoBinding::VariableSet(_) | ProtoBinding::RenameSet(_) => {
                     if end_len > 0 {panic!("Positional binding only allowed at start and end")}
                 }
@@ -1156,12 +1331,12 @@ fn binding_parts<'a, 'b>(proto_bindings: &'a Vec<ProtoBinding>, vars: &'b Vec<Va
         }
     }
     let var_strings: Vec<String> = vars.iter().map(|v| v.to_string()).collect();
-    assert!(start_len <= vars.len(), "can not bind {} (front) variables to positions [{}]", start_len, var_strings.join(", "));
-    assert!(start_len <= (vars.len() - end_len), "{} front and {} back variables are too much for [{}]", start_len, end_len, var_strings.join(", "));
+    assert!(total_start_len <= vars.len(), "can not bind {} (front) variables to positions [{}]", start_len, var_strings.join(", "));
+    assert!(total_start_len <= (vars.len() - total_end_len), "{} front and {} back variables are too much for [{}]", start_len, end_len, var_strings.join(", "));
 
     (
         &proto_bindings[..start_len],
-        &vars[start_len..(vars.len() - end_len)],
+        &vars[total_start_len..(vars.len() - total_end_len)],
         &proto_bindings[(proto_bindings.len() - end_len)..]
     )
 }
@@ -1308,6 +1483,11 @@ impl RuleBuilder {
         let mut set_predicates: HashMap<String, u64> = HashMap::new();
         let mut predicates_with_rename_set: HashSet<usize> = HashSet::new();
 
+        // flatten body (remove multi proto predicates)
+        let flat_body: Vec<ProtoPredicate> = self.body.iter().flat_map(
+            |p| p.flat_clone()
+        ).collect();
+
         // compute which predicate contains which variables and var set bindings
         // handle head
         if let Some(target) = &self.target_predicate{
@@ -1327,7 +1507,7 @@ impl RuleBuilder {
         }
 
         // handle body
-        for (i, proto_predicate) in self.body.iter().enumerate() {
+        for (i, proto_predicate) in flat_body.iter().enumerate() {
             let flag: u64 = { 2u64 }.checked_pow((i + 1) as u32).expect("long predicate lists are not supported");
             match proto_predicate {
                 ProtoPredicate::Explicit(predicate, bindings, _negated) => {
@@ -1368,6 +1548,7 @@ impl RuleBuilder {
                     // special predicates don't have predicate_vars therefore they can not have
                     // variable sets
                 }
+                ProtoPredicate::Multi(_) => panic!("flat body should not contain multi")
             }
         }
         let set_index: HashMap<_, _> = set_predicates.into_iter().map(|(k, v)| (v, k)).collect();
@@ -1375,7 +1556,7 @@ impl RuleBuilder {
         // Resolve variable sets in body
         let mut new_body: Vec<ProtoPredicate> = Vec::new();
         let mut set_variables: HashMap<String, Vec<VarPtr>> = HashMap::new();
-        for (i, proto_predicate) in self.body.iter().enumerate() {
+        for (i, proto_predicate) in flat_body.iter().enumerate() {
             if predicates_with_rename_set.contains(&i) {
                 // predicates with rename sets don't determine which variable belongs to which set (act like the head for `nemo_def!`) and are handled later
                 continue;
@@ -1410,7 +1591,8 @@ impl RuleBuilder {
                                                         ProtoBinding::Binding(b) => "binding".to_string(),
                                                         ProtoBinding::RenameSet(r) => "rename_set".to_string(),
                                                         ProtoBinding::Aggregate(a, b) => "aggregation".to_string(),
-                                                        ProtoBinding::NamedConnection(s) => s.clone()
+                                                        ProtoBinding::NamedConnection(s) => s.clone(),
+                                                        ProtoBinding::BindingList(l) => "binding_list".to_string(),
                                                     }
                                                 ).collect::<Vec<_>>().join(", ")
                                             )
@@ -1438,17 +1620,18 @@ impl RuleBuilder {
                     for (binding, _suffix) in bindings {
                         match binding {
                             ProtoBinding::Aggregate(_, _) | ProtoBinding::Binding(_) | ProtoBinding::NamedConnection(_) => {}, // allowed
-                            ProtoBinding::VariableSet(_) | ProtoBinding::RenameSet(_) => {panic!("rename sets and variable sets not allowed in special predicates")}
+                            ProtoBinding::VariableSet(_) | ProtoBinding::RenameSet(_) | ProtoBinding::BindingList(_) => {panic!("rename sets, term sets and variable sets not allowed in special predicates")}
                         }
                     }
                     new_body.push(ProtoPredicate::Special(prefix.clone(), bindings.clone()));
-                }
+                },
+                ProtoPredicate::Multi(_) => panic!("flat body should not contain multi")
             }
         }
 
         // resolve and rename sets in body
         let mut rename_set_variables: HashMap<String, Vec<VarPtr>> = HashMap::new();
-        for (i, proto_predicate) in self.body.iter().enumerate() {
+        for (i, proto_predicate) in flat_body.iter().enumerate() {
             if !predicates_with_rename_set.contains(&i) {
                 // predicates without rename sets are already handled
                 continue;
@@ -1486,7 +1669,8 @@ impl RuleBuilder {
                     new_bindings.extend(end.iter().cloned());
                     new_body.push(ProtoPredicate::Explicit(predicate.clone(), new_bindings, *negated))
                 },
-                ProtoPredicate::Special(_, _) => panic!("rename sets can only occur in explicit proto predicates and not in filters")
+                ProtoPredicate::Special(_, _) => panic!("rename sets can only occur in explicit proto predicates and not in filters"),
+                ProtoPredicate::Multi(_) => panic!("flat body should not contain multi"),
             }
         }
 
@@ -1691,9 +1875,7 @@ macro_rules! nemo_def {
                         )
                     )?
                     $(
-                        crate::nemo_model::ProtoBinding::Binding(
-                            crate::nemo_model::Binding::from(&$head_expression_front)
-                        )
+                        crate::nemo_model::ProtoBinding::from(&$head_expression_front)
                     )?
                     $(
                         crate::nemo_model::ProtoBinding::Aggregate(
@@ -1710,9 +1892,7 @@ macro_rules! nemo_def {
                                     )
                                 )?
                                 $(
-                                    crate::nemo_model::ProtoBinding::Binding(
-                                        crate::nemo_model::Binding::from(&$head_aggregate_front_expression)
-                                    )
+                                    crate::nemo_model::ProtoBinding::from(&$head_aggregate_front_expression)
                                 )?
                             ),+]
                         )
@@ -1735,9 +1915,7 @@ macro_rules! nemo_def {
                     )
                 )?
                 $(
-                    crate::nemo_model::ProtoBinding::Binding(
-                        crate::nemo_model::Binding::from(&$head_expression)
-                    )
+                    crate::nemo_model::ProtoBinding::from(&$head_expression)
                 )?
                 $(
                     crate::nemo_model::ProtoBinding::Aggregate(
@@ -1754,9 +1932,7 @@ macro_rules! nemo_def {
                                 )
                             )?
                             $(
-                                crate::nemo_model::ProtoBinding::Binding(
-                                    crate::nemo_model::Binding::from(&$head_aggregate_expression)
-                                )
+                                crate::nemo_model::ProtoBinding::from(&$head_aggregate_expression)
                             )?
                         ),+]
                     )
@@ -1775,9 +1951,7 @@ macro_rules! nemo_def {
                         )
                     )?
                     $(
-                        crate::nemo_model::ProtoBinding::Binding(
-                            crate::nemo_model::Binding::from(&$head_expression_back)
-                        )
+                        crate::nemo_model::ProtoBinding::from(&$head_expression_back)
                     )?
                     $(
                         crate::nemo_model::ProtoBinding::Aggregate(
@@ -1794,9 +1968,7 @@ macro_rules! nemo_def {
                                     )
                                 )?
                                 $(
-                                    crate::nemo_model::ProtoBinding::Binding(
-                                        crate::nemo_model::Binding::from(&$head_aggregate_back_expression)
-                                    )
+                                    crate::nemo_model::ProtoBinding::from(&$head_aggregate_back_expression)
                                 )?
                             ),+]
                         )
@@ -1821,9 +1993,7 @@ macro_rules! nemo_def {
                                 )
                             )?
                             $(
-                                crate::nemo_model::ProtoBinding::Binding(
-                                    crate::nemo_model::Binding::from(&$body_expression_front)
-                                )
+                                crate::nemo_model::ProtoBinding::from(&$body_expression_front)
                             )?
                         );
                     )+
@@ -1843,9 +2013,7 @@ macro_rules! nemo_def {
                             )
                         )?
                         $(
-                            crate::nemo_model::ProtoBinding::Binding(
-                                crate::nemo_model::Binding::from(&$body_expression)
-                            )
+                            crate::nemo_model::ProtoBinding::from(&$body_expression)
                         )?
                         $(
                             crate::nemo_model::ProtoBinding::RenameSet(
@@ -1866,9 +2034,7 @@ macro_rules! nemo_def {
                                 )
                             )?
                             $(
-                                crate::nemo_model::ProtoBinding::Binding(
-                                    crate::nemo_model::Binding::from(&$body_expression_back)
-                                )
+                                crate::nemo_model::ProtoBinding::from(&$body_expression_back)
                             )?
                         );
                     )+
@@ -1891,9 +2057,7 @@ macro_rules! nemo_def {
                                 )
                             )?
                             $(
-                                crate::nemo_model::ProtoBinding::Binding(
-                                    crate::nemo_model::Binding::from(&$negated_body_expression_front)
-                                )
+                                crate::nemo_model::ProtoBinding::from(&$negated_body_expression_front)
                             )?
                         );
                     )+
@@ -1913,9 +2077,7 @@ macro_rules! nemo_def {
                             )
                         )?
                         $(
-                            crate::nemo_model::ProtoBinding::Binding(
-                                crate::nemo_model::Binding::from(&$negated_body_expression)
-                            )
+                            crate::nemo_model::ProtoBinding::from(&$negated_body_expression)
                         )?
                         $(
                             crate::nemo_model::ProtoBinding::RenameSet(
@@ -1936,9 +2098,7 @@ macro_rules! nemo_def {
                                 )
                             )?
                             $(
-                                crate::nemo_model::ProtoBinding::Binding(
-                                    crate::nemo_model::Binding::from(&$negated_body_expression_back)
-                                )
+                                crate::nemo_model::ProtoBinding::from(&$negated_body_expression_back)
                             )?
                         );
                     )+
@@ -2095,9 +2255,7 @@ macro_rules! nemo_add {
                         )
                     )?
                     $(
-                        crate::nemo_model::ProtoBinding::Binding(
-                            crate::nemo_model::Binding::from(&$head_expression_front)
-                        )
+                        crate::nemo_model::ProtoBinding::from(&$head_expression_front)
                     )?
                     $(
                         crate::nemo_model::ProtoBinding::Aggregate(
@@ -2114,9 +2272,7 @@ macro_rules! nemo_add {
                                     )
                                 )?
                                 $(
-                                    crate::nemo_model::ProtoBinding::Binding(
-                                        crate::nemo_model::Binding::from(&$head_aggregate_front_expression)
-                                    )
+                                    crate::nemo_model::ProtoBinding::from(&$head_aggregate_front_expression)
                                 )?
                             ),+]
                         )
@@ -2139,9 +2295,7 @@ macro_rules! nemo_add {
                     )
                 )?
                 $(
-                    crate::nemo_model::ProtoBinding::Binding(
-                        crate::nemo_model::Binding::from(&$head_expression)
-                    )
+                    crate::nemo_model::ProtoBinding::from(&$head_expression)
                 )?
                 $(
                     crate::nemo_model::ProtoBinding::Aggregate(
@@ -2158,9 +2312,7 @@ macro_rules! nemo_add {
                                 )
                             )?
                             $(
-                                crate::nemo_model::ProtoBinding::Binding(
-                                    crate::nemo_model::Binding::from(&$head_aggregate_expression)
-                                )
+                                crate::nemo_model::ProtoBinding::from(&$head_aggregate_expression)
                             )?
                         ),+]
                     )
@@ -2179,9 +2331,7 @@ macro_rules! nemo_add {
                         )
                     )?
                     $(
-                        crate::nemo_model::ProtoBinding::Binding(
-                            crate::nemo_model::Binding::from(&$head_expression_back)
-                        )
+                        crate::nemo_model::ProtoBinding::from(&$head_expression_back)
                     )?
                     $(
                         crate::nemo_model::ProtoBinding::Aggregate(
@@ -2198,9 +2348,7 @@ macro_rules! nemo_add {
                                     )
                                 )?
                                 $(
-                                    crate::nemo_model::ProtoBinding::Binding(
-                                        crate::nemo_model::Binding::from(&$head_aggregate_back_expression)
-                                    )
+                                    crate::nemo_model::ProtoBinding::from(&$head_aggregate_back_expression)
                                 )?
                             ),+]
                         )
@@ -2225,9 +2373,7 @@ macro_rules! nemo_add {
                                 )
                             )?
                             $(
-                                crate::nemo_model::ProtoBinding::Binding(
-                                    crate::nemo_model::Binding::from(&$body_expression_front)
-                                )
+                                crate::nemo_model::ProtoBinding::from(&$body_expression_front)
                             )?
                         );
                     )+
@@ -2247,9 +2393,7 @@ macro_rules! nemo_add {
                             )
                         )?
                         $(
-                            crate::nemo_model::ProtoBinding::Binding(
-                                crate::nemo_model::Binding::from(&$body_expression)
-                            )
+                            crate::nemo_model::ProtoBinding::from(&$body_expression)
                         )?
                         $(
                             crate::nemo_model::ProtoBinding::RenameSet(
@@ -2270,9 +2414,7 @@ macro_rules! nemo_add {
                                 )
                             )?
                             $(
-                                crate::nemo_model::ProtoBinding::Binding(
-                                    crate::nemo_model::Binding::from(&$body_expression_back)
-                                )
+                                crate::nemo_model::ProtoBinding::from(&$body_expression_back)
                             )?
                         );
                     )+
@@ -2295,9 +2437,7 @@ macro_rules! nemo_add {
                                 )
                             )?
                             $(
-                                crate::nemo_model::ProtoBinding::Binding(
-                                    crate::nemo_model::Binding::from(&$negated_body_expression_front)
-                                )
+                                crate::nemo_model::ProtoBinding::from(&$negated_body_expression_front)
                             )?
                         );
                     )+
@@ -2317,9 +2457,7 @@ macro_rules! nemo_add {
                             )
                         )?
                         $(
-                            crate::nemo_model::ProtoBinding::Binding(
-                                crate::nemo_model::Binding::from(&$negated_body_expression)
-                            )
+                            crate::nemo_model::ProtoBinding::from(&$negated_body_expression)
                         )?
                         $(
                             crate::nemo_model::ProtoBinding::RenameSet(
@@ -2340,9 +2478,7 @@ macro_rules! nemo_add {
                                 )
                             )?
                             $(
-                                crate::nemo_model::ProtoBinding::Binding(
-                                    crate::nemo_model::Binding::from(&$negated_body_expression_back)
-                                )
+                                crate::nemo_model::ProtoBinding::from(&$negated_body_expression_back)
                             )?
                         );
                     )+
@@ -2375,3 +2511,6 @@ pub(crate) use nemo_var;
 pub(crate) use nemo_iri;
 pub(crate) use nemo_call;
 pub(crate) use nemo_filter;
+pub(crate) use nemo_condition;
+pub(crate) use nemo_terms;
+pub(crate) use nemo_atoms;

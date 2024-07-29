@@ -5,7 +5,7 @@ use spargebra::Query;
 use spargebra::term::{BlankNode, GroundTerm, Literal, NamedNode, NamedNodePattern, TermPattern, TriplePattern, Variable};
 use crate::error::TranslateError;
 use crate::error::TranslateError::{AggregationNotImplemented, ExpressionNotImplemented, MultiPatternNotImplemented, PathNotImplemented, PatternNotImplemented, SequencePatternNotImplemented, TermNotImplemented, Todo};
-use crate::nemo_model::{add_fact, add_rule, Binding, BoundPredicate, Call, construct_program, Fact, get_vars, hash_dedup, nemo_add, nemo_call, nemo_declare, nemo_def, nemo_filter, nemo_predicate_type, nemo_var, PredicatePtr, ProtoPredicate, Rule, SpecialPredicate, to_bound_predicate, TypedPredicate, VarPtr};
+use crate::nemo_model::{add_fact, add_rule, Binding, BoundPredicate, Call, construct_program, Fact, get_vars, hash_dedup, nemo_add, nemo_atoms, nemo_call, nemo_condition, nemo_declare, nemo_def, nemo_filter, nemo_predicate_type, nemo_terms, nemo_var, PredicatePtr, ProtoPredicate, Rule, SpecialPredicate, to_bound_predicate, TypedPredicate, VarPtr};
 
 nemo_predicate_type!(SolutionSet = ...);
 nemo_predicate_type!(SolutionMultiSet = count ...);
@@ -81,6 +81,11 @@ impl QueryTranslator {
         SolutionSet::from_predicate(&self.input_graph)
     }
 
+    fn translate_var_func(&mut self) -> impl FnMut(&Variable) -> VarPtr + '_ {
+        let mut self_ref = self;
+        move |var: &Variable| self_ref.sparql_vars.get(var)
+    }
+
     fn translate_expression_variable(&mut self, var: &Variable, binding: &dyn TypedPredicate) -> Result<SolutionExpression, TranslateError> {
         let var_binding = self.sparql_vars.get(var);
         nemo_def!(var(var_binding; @result: var_binding) :- binding(??set_contains_var); SolutionExpression);
@@ -140,32 +145,15 @@ impl QueryTranslator {
 
     fn translate_in(&mut self, inner: &SolutionExpression, list: &Vec<SolutionExpression>, binding: &dyn TypedPredicate) -> Result<SolutionExpression, TranslateError> {
         // FALSE CASE
-        // create solution
-        let variables: Vec<VarPtr> = inner.depend_vars().into_iter()
-            .chain(list.iter().flat_map(|solution| solution.depend_vars()))
-            .chain(vec![VarPtr::new("result")])
-            .collect();
-        let in_expression = SolutionExpression::create("in_expression", hash_dedup(&variables));
-
-        // head
-        let mut head_bindings: Vec<Binding> = get_vars(&in_expression).iter().map(Binding::from).collect();
-        head_bindings.pop();
-        head_bindings.push(Binding::from(false));
-
-        // body
-        let mut body = vec![to_bound_predicate(binding), to_bound_predicate(inner)];
-        let mut filters = Vec::new();
+        let mut false_conditions = nemo_atoms![];
         for expr in list {
-            body.push(to_bound_predicate(expr));
-            filters.push(SpecialPredicate::new(
-                "".to_string(), vec![
-                    (Binding::from(expr.result_var()), " != ".to_string()),
-                    (Binding::from(inner.result_var()), "".to_string())
-                ]
-            ));
+            false_conditions = nemo_atoms![false_conditions, expr, nemo_condition!(expr.result_var(), " != ", inner.result_var())]
         }
-
-        add_rule(&in_expression, Rule::new(head_bindings, body, filters));
+        nemo_def!(
+            in_expression(nemo_terms!(inner.depend_vars(), list => SolutionExpression::depend_vars, false))
+            :- {binding}, {inner}, {false_conditions}
+            ; SolutionExpression
+        );
 
         // TRUE CASES
         for expr in list {
