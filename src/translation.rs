@@ -168,6 +168,8 @@ impl QueryTranslator {
         Ok(in_expression)
     }
 
+    /// notes
+    /// - "... all operators operate on RDF Terms and will produce a type error if any arguments are unbound."
     fn translate_binary_operator(&mut self, l: Binding, r: Binding, result: Binding, left_solution: &SolutionExpression, right_solution: &SolutionExpression, binding: &dyn TypedPredicate) -> Result<SolutionExpression, TranslateError>{
         nemo_def!(
             op(??vars, ??left, ??right; @result: result) :-
@@ -184,6 +186,8 @@ impl QueryTranslator {
         Ok(partial_exists)
     }
 
+    /// notes
+    /// - Consider current bindings to restrict and therefore optimize inner pattern for EXISTS
     fn translate_exists(&mut self, pattern_solution: &SolutionSet, binding: &dyn TypedPredicate) -> Result<SolutionExpression, TranslateError> {
         let partial_exists = self.translate_positive_exists(pattern_solution, binding)?;
         nemo_def!(exists(??vars; @result: true) :- partial_exists(??vars; @result: true); SolutionExpression);
@@ -209,6 +213,8 @@ impl QueryTranslator {
         Ok(if_expression)
     }
 
+    /// notes
+    /// - effective boolean value calculation for named nodes (IRIs) seems wrong, they are neither true nor false
     fn translate_effective_boolean_value(&mut self, expression: &SolutionExpression) -> Result<SolutionExpression, TranslateError> {
         // bools
         nemo_def!(effective_boolean_value(??vars; @result: false) :- expression(??vars; @result: ?v), {nemo_filter!("", ?v, " = ", false, "")}; SolutionExpression);
@@ -257,6 +263,14 @@ impl QueryTranslator {
         Ok(solution)
     }
 
+    /// notes
+    /// - check if date function could be implemented
+    /// - "Apart from BOUND, COALESCE, NOT EXISTS and EXISTS, all functions and operators operate on RDF Terms and will produce a type error if any arguments are unbound."
+    /// - "Any expression other than logical-or (||) or logical-and (&&) that encounters an error will produce that error."
+    /// - ??? Impossible functions (that error for all inputs in NEMO, e.g. date functions) produce unbound predicates
+    /// - round function is not standard compliant
+    /// - stringreverse in nemo but not in my implementation
+    /// - bnode creation would be possible
     fn translate_function(&mut self, func: &Function, parameter_expressions: &Vec<Expression>, binding: &dyn TypedPredicate) -> Result<SolutionExpression, TranslateError> {
         let params = parameter_expressions.iter().map(|e| self.translate_expression(e, binding)).collect::<Result<Vec<_>, _>>()?;
         match func {
@@ -346,6 +360,9 @@ impl QueryTranslator {
         }
     }
 
+    /// notes
+    /// - implement COALESCE -> requires negation or aggregation if errors are represented by missing facts
+    /// - Better error handling in boolean operations, the current implementation using OR, and AND does not handle errors correctly; maybe check all the functions for error handling...
     fn translate_expression(&mut self, expression: &Expression, binding: &dyn TypedPredicate) -> Result<SolutionExpression, TranslateError> {
         match expression {
             Expression::Variable(v) => self.translate_expression_variable(v, binding),
@@ -524,6 +541,8 @@ impl QueryTranslator {
         Ok(bgp)
     }
 
+    /// notes
+    /// - check if same bnodes in separate bgp count as same variable -> not in current implementation
     fn translate_bgp_multi(&mut self, patterns: &Vec<TriplePattern>) -> Result<SolutionMultiSet, TranslateError> {
         let mut variables = Vec::new();
         let mut bnode_vars = Vec::new();
@@ -548,6 +567,8 @@ impl QueryTranslator {
         }
     }
 
+    /// notes
+    /// - path iteration could probably restrict inner path more (only compute inner path for actually needed)
     fn translate_one_or_more_path(&mut self, start: Binding, path: &SolutionSet, end: Binding) -> SolutionSet {
         let reverse_iterate = Self::is_constant(&end) && !Self::is_constant(&start);
         let mid = nemo_var!(mid);
@@ -565,6 +586,10 @@ impl QueryTranslator {
         }
     }
 
+    /// notes
+    /// - check if spargebra normalizes literals, there is a string equality check in zero_path_extend
+    /// - comparison of constants based on literal values in zero_path_extend
+    /// 	- now done using spargebra Term comperision
     fn zero_path_extend(&mut self, start: Binding, path: SolutionSet, end: Binding) -> SolutionSet {
         // start and end are different constants -> there is no zero path
         if Self::is_constant(&start) && Self::is_constant(&end) && &start != &end { return path }
@@ -588,6 +613,9 @@ impl QueryTranslator {
         }
     }
 
+    /// notes
+    /// - check negated property set. current implementation only matches forward properties.
+    /// 	- seems kind of correct: https://www.w3.org/TR/sparql11-query/#eval_negatedPropertySet
     fn translate_negated_property_set(&mut self, start: Binding, properties: &Vec<NamedNode>, end: Binding) -> SolutionSet {
         let mut filters = nemo_atoms!();
         for p in properties {
@@ -598,6 +626,9 @@ impl QueryTranslator {
         negated_property_set
     }
 
+    /// notes
+    /// - check bnodes in path expression start or end
+    /// - zero length path between node not in data is treated as not existing I think is this correct?
     fn translate_path(&mut self, start: Binding, path: &PropertyPathExpression, end: Binding) -> Result<SolutionSet, TranslateError> {
         match path {
             PropertyPathExpression::NamedNode(property) => {
@@ -644,6 +675,10 @@ impl QueryTranslator {
         }
     }
 
+    /// notes
+    /// - changed left join to call the filter also on the unbound variables, is this correct?
+    /// 	- changed back because filtered values should probably lead to unbound values
+    /// - could optimize left join to not do unbound variables if all variables match (but probably mostly they don't)
     fn translate_left_join(&mut self, left: &Box<GraphPattern>, right: &Box<GraphPattern>, expression: &Option<Expression>) -> Result<SolutionSet, TranslateError> {
         let left_solution = self.translate_pattern(left)?;
         let right_solution = self.translate_pattern(right)?;
@@ -673,6 +708,8 @@ impl QueryTranslator {
         Ok(filter)
     }
 
+    /// notes
+    /// - ??? represent union of solutions with differently bound variables
     fn translate_union(&mut self, left: &SolutionSet, right: &SolutionSet) -> Result<SolutionSet, TranslateError> {
         let left_vars = get_vars(left);
         let right_vars = get_vars(right);
@@ -689,6 +726,8 @@ impl QueryTranslator {
         Ok(union)
     }
 
+    /// notes
+    /// - Test what others do when binding to an already existing variable
     fn translate_extend(&mut self, inner: &SolutionSet, var: &Variable, expression: &SolutionExpression) -> Result<SolutionSet, TranslateError> {
         let bound_var = self.sparql_vars.get(var);
         nemo_def!(extend(??e_vars, ??base_vars, bound_var) :- inner(??e_vars, ??base_vars), expression(??e_vars; @result: bound_var); SolutionSet);
@@ -751,6 +790,9 @@ impl QueryTranslator {
         Ok(aggregate)
     }
 
+    /// note
+    /// - count(*) with all variables grouped results in count in nemo without parameters -> error
+    /// - is count(*) with all variables grouped valid sparql? currently crashes
     fn translate_count_all(&mut self, inner: &dyn TypedPredicate, variable: VarPtr, group_vars: Vec<VarPtr>) -> Result<SolutionSet, TranslateError> {
         let aggregate_vars: Vec<VarPtr> = get_vars(inner).iter().filter(|v| !group_vars.contains(v)).map(|v| v.clone()).collect();
         let aggregation_call = Call::new("#count", aggregate_vars.iter().map(Binding::from).collect());
@@ -759,6 +801,11 @@ impl QueryTranslator {
         Ok(count_all)
     }
 
+    /// notes
+    /// - Note: aggregation somewhat different in spargebra vs. SPARQL semantic
+    /// - Implement remaining aggregations
+    /// - Think about error during aggregation
+    /// - Implement non distinct aggregations
     fn translate_group_by(&mut self, inner: &SolutionSet, group_vars: &Vec<Variable>, aggregates: &Vec<(Variable, AggregateExpression)>) -> Result<SolutionSet, TranslateError> {
         let collect_aggregations = SolutionSet::create(
             "collect_aggregations",
@@ -783,6 +830,9 @@ impl QueryTranslator {
     }
 
     /// a stable sort
+    /// notes
+    /// - Undefined sorted first
+    /// - sort assumes total order
     fn translate_sort(&mut self, inner: &SolutionSequence, order_expression: &OrderExpression) -> Result<SolutionSequence, TranslateError> {
         let val = nemo_var!(sort_val);
         let other_val = nemo_var!(other_sort_val);
@@ -816,6 +866,8 @@ impl QueryTranslator {
         multi
     }
 
+    /// notes
+    /// - get_sequence uses hacky bit (could be replaced by sort in the future)
     fn get_sequence(&mut self, inner: &SolutionSet) -> SolutionSequence {
         nemo_def!(sequence_proto(??vars; @result: nemo_var!(!bnode_for_id)) :- inner(??vars); SolutionExpression);
         let bnode_var = nemo_var!(bnode_var);
@@ -827,6 +879,8 @@ impl QueryTranslator {
         sequence
     }
 
+    /// notes
+    /// - get_sequence_from_multi uses relatively slow iteration
     fn get_sequence_from_multi(&mut self, inner: &SolutionMultiSet) -> SolutionSequence {
         let remaining = nemo_var!(remaining);
         nemo_def!(pre_index(??vars, remaining.clone() - 1) :- inner(@count: remaining.clone(); ??vars); SolutionSet);
@@ -841,6 +895,8 @@ impl QueryTranslator {
         as_multi
     }
 
+    /// notes
+    /// - Handle non overlapping domain for Minus
     fn translate_pattern(&mut self, pattern: &GraphPattern) -> Result<SolutionSet, TranslateError> {
         match pattern {
             GraphPattern::Bgp {patterns} => self.translate_bgp(patterns),
@@ -1025,6 +1081,11 @@ impl QueryTranslator {
         Ok(())
     }
 
+    /// notes
+    /// - Check if literal literals result in error in construct query subject
+    /// - handle unbound variables in construct query (triples that contain them are filtered)
+    /// - no graphs for construct
+    /// - does construct construct constant triples also if there are no solutions?
     fn translate_construct(&mut self, pattern: &GraphPattern, template: &Vec<TriplePattern>) -> Result<SolutionSet, TranslateError> {
         let (s, p, o) = (VarPtr::new("s"), VarPtr::new("p"), VarPtr::new("o"));
         let solution = self.translate_pattern(pattern)?;
@@ -1069,6 +1130,10 @@ impl QueryTranslator {
         }
     }
 
+    /// notes
+    /// - handle from (dataset) and base_iri
+    /// - ASK, CONSTRUCT and DESCRIBE can use distinct always
+    /// - Check that limit + order by works for construct and describe
     fn translate_query(&mut self, query: &Query) -> Result<Box<dyn TypedPredicate>, TranslateError> {
         match query {
             Query::Select {
