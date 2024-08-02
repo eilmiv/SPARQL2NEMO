@@ -1,6 +1,6 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::fmt::{Debug, Display, Formatter, Write};
+use std::fmt::{Debug, Display, Formatter};
 use std::hash::{Hash, Hasher};
 use std::ops;
 use std::rc::Rc;
@@ -58,12 +58,6 @@ pub struct TermSet {
 impl TermSet {
     pub fn new() -> Self {
         TermSet{variables: Vec::new(), binding_map: HashMap::new()}
-    }
-
-    pub fn from_vars(variables: &Vec<VarPtr>) -> Self {
-        let mut term_set = Self::new();
-        for v in variables {term_set.add_var(v)}
-        term_set
     }
 
     pub fn from_bindings(bindings: &Vec<Binding>) -> Self {
@@ -139,6 +133,7 @@ macro_rules! nemo_terms {
         {
             let mut term_set = crate::nemo_model::TermSet::new();
             $(
+                #[allow(unused_variables)]
                 let to_add = vec![$part];
                 $(
                     let to_add: Vec<crate::nemo_model::TermSet> = ($part).iter().map($func).map(crate::nemo_model::TermSet::from).collect();
@@ -206,13 +201,11 @@ struct PredicatePos {
     properties: u32,
     /// position in predicate, positions are fixed after initialization
     pos: usize,
-    /// the key for defining special positions for [TypedPredicate]
-    key: &'static str
 }
 
 impl PredicatePos{
     pub fn new(pos: usize, variable: VarPtr) -> PredicatePos{
-        PredicatePos{variable, properties: 0, pos, key: ""}
+        PredicatePos{variable, properties: u32::MAX, pos}
     }
 }
 
@@ -505,7 +498,7 @@ impl BoundPredicate {
             .collect::<Vec<_>>()
             .join(", "));
         let predicate_name = self.predicate.construct_program(state);
-        let negated = if(self.negated) {"~"} else {""};
+        let negated = if self.negated {"~"} else {""};
         format!("{negated}{predicate_name}({inner})")
     }
 }
@@ -794,13 +787,9 @@ impl GenState {
     }
 
     /// get unique name for given predicate, returns `None` if not [registered](GenState::register).
+    /// Can also be used to determine if the predicate is registered.
     pub fn name(&self, predicate: &PredicatePtr) -> Option<String>{
         self.already_generated_predicates.get(predicate).cloned()
-    }
-
-    /// determine if the predicate is registered
-    pub fn has(&self, predicate: &PredicatePtr) -> bool {
-        self.already_generated_predicates.contains_key(predicate)
     }
 
     /// add new line to the program text
@@ -957,8 +946,8 @@ impl TypedPredicate for Basic {
         Basic {inner: self.inner.clone()}
     }
 
-    fn add_optional_named_binding(&self, name: &str) -> Box<dyn Fn (&mut RuleBuilder, ProtoBinding) + '_> {
-        Box::new(|builder, binding| {})
+    fn add_optional_named_binding(&self, _name: &str) -> Box<dyn Fn (&mut RuleBuilder, ProtoBinding) + '_> {
+        Box::new(|_builder, _binding| {})
     }
 }
 
@@ -1001,7 +990,7 @@ impl TypedPredicate for WithMultiplicity {
     fn add_optional_named_binding(&self, name: &str) -> Box<dyn Fn(&mut RuleBuilder, ProtoBinding) + '_> {
         match name {
             "count" => Box::new(|builder, binding| self.count(builder, binding)),
-            _ => Box::new(|builder, binding| {})
+            _ => Box::new(|_builder, _binding| {})
         }
     }
 }
@@ -1069,7 +1058,7 @@ macro_rules! nemo_predicate_type {
                     $(
                         stringify!($pos_back) => Box::new(|builder, binding| self.$pos_back(builder, binding)),
                     )*
-                    _ => Box::new(|builder, binding| {})
+                    _ => Box::new(|_builder, _binding| {})
                 }
             }
         }
@@ -1141,7 +1130,7 @@ impl ProtoBinding {
             },
             ProtoBinding::VariableSet(s) => panic!("VariableSet \"{s}\" not resolved."),
             ProtoBinding::RenameSet(s) => panic!("RenameSet \"{s}\" not resolved."),
-            ProtoBinding::BindingList(l) => panic!("BindingList not resolved."),
+            ProtoBinding::BindingList(_l) => panic!("BindingList not resolved."),
             ProtoBinding::Aggregate(name, sub_bindings) => {
                 Binding::Call(Call::new(
                     &format!("#{name}"),
@@ -1487,7 +1476,7 @@ impl RuleBuilder {
 
     fn check(&self){
         assert!(self.partial_atom.is_empty(), "partial atom read");
-        if let Some(p) = &self.target_predicate {
+        if let Some(_p) = &self.target_predicate {
             // uncomment to disallow using predicate under different name
             //assert_eq!(p.label(), self.predicate_name, "name mismatch");
         }
@@ -1510,7 +1499,7 @@ impl RuleBuilder {
         // handle head
         if let Some(target) = &self.target_predicate{
             let target_vars = target.vars();
-            let (start, middle_vars, end) = binding_parts(&self.head, &target_vars);
+            let (_start, middle_vars, _end) = binding_parts(&self.head, &target_vars);
             for var in middle_vars {
                 var_predicates.insert(var.clone(), 1);
             }
@@ -1562,7 +1551,7 @@ impl RuleBuilder {
                         }
                     }
                 },
-                ProtoPredicate::Special(prefix, bindings) => {
+                ProtoPredicate::Special(_prefix, _bindings) => {
                     // special predicates don't have predicate_vars therefore they can not have
                     // variable sets
                 }
@@ -1606,11 +1595,11 @@ impl RuleBuilder {
                                                 bindings.iter().map(
                                                     |b| match b {
                                                         ProtoBinding::VariableSet(s) => s.clone(),
-                                                        ProtoBinding::Binding(b) => "binding".to_string(),
-                                                        ProtoBinding::RenameSet(r) => "rename_set".to_string(),
-                                                        ProtoBinding::Aggregate(a, b) => "aggregation".to_string(),
+                                                        ProtoBinding::Binding(_b) => "binding".to_string(),
+                                                        ProtoBinding::RenameSet(_r) => "rename_set".to_string(),
+                                                        ProtoBinding::Aggregate(_a, _b) => "aggregation".to_string(),
                                                         ProtoBinding::NamedConnection(s) => s.clone(),
-                                                        ProtoBinding::BindingList(l) => "binding_list".to_string(),
+                                                        ProtoBinding::BindingList(_l) => "binding_list".to_string(),
                                                     }
                                                 ).collect::<Vec<_>>().join(", ")
                                             )
@@ -1750,7 +1739,7 @@ impl RuleBuilder {
         let name = self.predicate_name.clone();
         let rule = self.to_rule();
 
-        let mut result = T::create(
+        let result = T::create(
             &name,
             rule.bindings.iter().map(|b| b.variable()).collect()
         );
@@ -1771,10 +1760,10 @@ impl RuleBuilder {
 
 macro_rules! nemo_declare {
     ($name:ident($($arg:ident),*)) => {
-        let mut $name = crate::nemo_model::Basic::create(stringify!($name), vec![$($arg),*]);
+        let $name = crate::nemo_model::Basic::create(stringify!($name), vec![$($arg),*]);
     };
     ($name:ident($($arg:ident),*); $type:ty) => {
-        let mut $name = <$type>::create(stringify!($name), vec![$($arg),*]);
+        let $name = <$type>::create(stringify!($name), vec![$($arg),*]);
     };
 }
 
@@ -1878,6 +1867,7 @@ macro_rules! nemo_def {
         ),+; $predicate_type:ty $(; $predicate_name:expr)?
     ) => {
         let mut builder = crate::nemo_model::RuleBuilder::new();
+        #[allow(unused_variables)]
         let head_predicate = <$predicate_type>::create_dummy();
 
         builder.set_property_name(stringify!($head_name));
@@ -2144,7 +2134,7 @@ macro_rules! nemo_def {
         ----- END OF DUPLICATED BLOCK -----
          */
 
-        let mut $head_name = builder.to_predicate::<$predicate_type>();
+        let $head_name = builder.to_predicate::<$predicate_type>();
     };
 }
 
@@ -2259,6 +2249,7 @@ macro_rules! nemo_add {
         ),+
     ) => {
         let mut builder = crate::nemo_model::RuleBuilder::new_for({&$head_name}.get_predicate());
+        #[allow(unused_variables)]
         let head_predicate = {&$head_name};
         builder.set_property_name(stringify!($head_name));
         /*

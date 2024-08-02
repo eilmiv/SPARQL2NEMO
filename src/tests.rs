@@ -204,9 +204,9 @@ fn bgp_multi() -> Result<(), Error> {
     )
 }
 
+/// also tests named node and reverse
 #[test]
 fn path_alternative() -> Result<(), Error> {
-    /// also tests named node and reverse
     assert_sparql(
         "
             prefix ex: <https://example.com/>

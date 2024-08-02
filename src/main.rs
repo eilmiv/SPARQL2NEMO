@@ -1,6 +1,4 @@
-mod basic_solutions;
 mod error;
-mod state;
 mod solution;
 mod nemo_model;
 mod translation;
@@ -68,7 +66,7 @@ macro_rules! call_method {
     ($obj:expr, $method:ident) => {{$obj}.$method()};
 }
 
-const POSITIONS: [&str; 1+{stringify!(a).len()}+1] = ["abc", "xyz", "ooo"];
+const _POSITIONS: [&str; 1+{stringify!(a).len()}+1] = ["abc", "xyz", "ooo"];
 
 fn _test_rust(){
     println!("testing rust...");
@@ -87,7 +85,7 @@ fn _test_rust(){
     println!("{:?}", v3);
 
     println!("{}", call_method!("xyu", to_uppercase));
-    println!("{}", POSITIONS.iter().position(|s| *s == "xyz").unwrap())
+    println!("{}", _POSITIONS.iter().position(|s| *s == "xyz").unwrap())
 }
 
 

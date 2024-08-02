@@ -1,11 +1,11 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fmt::Debug;
 use spargebra::algebra::{AggregateExpression, Expression, Function, GraphPattern, OrderExpression, PropertyPathExpression};
 use spargebra::Query;
 use spargebra::term::{BlankNode, GroundTerm, Literal, NamedNode, NamedNodePattern, TermPattern, TriplePattern, Variable};
 use crate::error::TranslateError;
-use crate::error::TranslateError::{AggregationNotImplemented, ExpressionNotImplemented, MultiPatternNotImplemented, PathNotImplemented, PatternNotImplemented, SequencePatternNotImplemented, TermNotImplemented, Todo};
-use crate::nemo_model::{add_fact, add_rule, Binding, BoundPredicate, Call, construct_program, Fact, get_vars, hash_dedup, nemo_add, nemo_atoms, nemo_call, nemo_condition, nemo_declare, nemo_def, nemo_filter, nemo_predicate_type, nemo_terms, nemo_var, PredicatePtr, ProtoPredicate, Rule, SpecialPredicate, to_bound_predicate, TypedPredicate, VarPtr};
+use crate::error::TranslateError::{AggregationNotImplemented, ExpressionNotImplemented, MultiPatternNotImplemented, PatternNotImplemented, SequencePatternNotImplemented};
+use crate::nemo_model::{add_rule, Binding, BoundPredicate, Call, construct_program, get_vars, hash_dedup, nemo_add, nemo_atoms, nemo_call, nemo_condition, nemo_def, nemo_filter, nemo_predicate_type, nemo_terms, nemo_var, PredicatePtr, ProtoPredicate, Rule, to_bound_predicate, TypedPredicate, VarPtr};
 
 nemo_predicate_type!(SolutionSet = ...);
 nemo_predicate_type!(SolutionMultiSet = count ...);
@@ -82,8 +82,7 @@ impl QueryTranslator {
     }
 
     fn translate_var_func(&mut self) -> impl FnMut(&Variable) -> VarPtr + '_ {
-        let mut self_ref = self;
-        move |var: &Variable| self_ref.sparql_vars.get(var)
+        move |var: &Variable| self.sparql_vars.get(var)
     }
 
     fn translate_expression_variable(&mut self, var: &Variable, binding: &dyn TypedPredicate) -> Result<SolutionExpression, TranslateError> {
@@ -215,10 +214,11 @@ impl QueryTranslator {
 
     /// notes
     /// - effective boolean value calculation for named nodes (IRIs) seems wrong, they are neither true nor false
+    /// - note that the bool false case was wrong but tests didn't fail -> maybe add some more tests
     fn translate_effective_boolean_value(&mut self, expression: &SolutionExpression) -> Result<SolutionExpression, TranslateError> {
         // bools
         nemo_def!(effective_boolean_value(??vars; @result: false) :- expression(??vars; @result: ?v), {nemo_filter!("", ?v, " = ", false, "")}; SolutionExpression);
-        nemo_def!(effective_boolean_value(??vars; @result: true) :- expression(??vars; @result: ?v), {nemo_filter!("", ?v, " = ", true, "")}; SolutionExpression);
+        nemo_add!(effective_boolean_value(??vars; @result: true) :- expression(??vars; @result: ?v), {nemo_filter!("", ?v, " = ", true, "")});
 
         // strings
         nemo_add!(effective_boolean_value(??vars; @result: false) :- expression(??vars; @result: ?v), {nemo_filter!("STRLEN(", ?v, ") = 0")});
@@ -500,6 +500,7 @@ impl QueryTranslator {
 
 
     fn translate_term(&mut self, term: &TermPattern, variables: &mut Vec<VarPtr>, bnode_vars: &mut Vec<VarPtr>) -> Result<Binding, TranslateError> {
+        #[allow(unreachable_patterns)]
         Ok(match term {
             TermPattern::NamedNode(node) => Binding::from(node),
             TermPattern::Literal(node) => Binding::from(node),
@@ -512,8 +513,8 @@ impl QueryTranslator {
                 let var = self.sparql_vars.get(var);
                 variables.push(var.clone());
                 Binding::from(var)
-            }
-            _ => return Err(TermNotImplemented(term.clone()))
+            },
+            _ => unreachable!("Sub triples not enabled")
         })
     }
 
@@ -561,8 +562,8 @@ impl QueryTranslator {
 
     fn is_constant(b: &Binding) -> bool {
         match b {
-            Binding::Constant(c) => true,
-            Binding::Variable(v) => false,
+            Binding::Constant(_c) => true,
+            Binding::Variable(_v) => false,
             _ => panic!("this function should only be called with variables or constants")
         }
     }
@@ -671,7 +672,6 @@ impl QueryTranslator {
             PropertyPathExpression::NegatedPropertySet(properties) => {
                 Ok(self.translate_negated_property_set(start, properties, end))
             }
-            _ => Err(TranslateError::PathNotImplemented(path.clone()))
         }
     }
 
@@ -736,6 +736,7 @@ impl QueryTranslator {
     }
 
     fn translate_ground_term(&mut self, term: &Option<GroundTerm>) -> Binding {
+        #[allow(unreachable_patterns)]
         match term {
             None => nemo_var!(!UNDEF),
             Some(GroundTerm::Literal(l)) => Binding::from(l),
@@ -809,7 +810,7 @@ impl QueryTranslator {
     fn translate_group_by(&mut self, inner: &SolutionSet, group_vars: &Vec<Variable>, aggregates: &Vec<(Variable, AggregateExpression)>) -> Result<SolutionSet, TranslateError> {
         let collect_aggregations = SolutionSet::create(
             "collect_aggregations",
-            group_vars.iter().chain(aggregates.iter().map(|(v, a)| v)).map(|v| self.sparql_vars.get(v)).collect()
+            group_vars.iter().chain(aggregates.iter().map(|(v, _a)| v)).map(|v| self.sparql_vars.get(v)).collect()
         );
         let mut body = vec![to_bound_predicate(inner)];
         for (variable, aggregation) in aggregates {
@@ -944,7 +945,7 @@ impl QueryTranslator {
             GraphPattern::Values {variables, bindings} => {
                 Ok(self.translate_values(variables, bindings))
             }
-            GraphPattern::OrderBy {inner, expression} => {
+            GraphPattern::OrderBy {inner, expression: _} => {
                 // SolutionSet does not contain ordering information
                 let inner_solution = self.translate_pattern(inner)?;
                 nemo_def!(irrelevant_order_by(??vars) :- inner_solution(??vars); SolutionSet);
@@ -1075,7 +1076,7 @@ impl QueryTranslator {
     }
 
     fn extract_bnodes(&mut self, pattern: &TriplePattern, bnodes: &mut Vec<VarPtr>) -> Result<(), TranslateError> {
-        let TriplePattern{subject, predicate, object} = pattern;
+        let TriplePattern{subject, predicate: _, object} = pattern;
         self.translate_term(subject, &mut vec![], bnodes)?;
         self.translate_term(object, &mut vec![], bnodes)?;
         Ok(())
