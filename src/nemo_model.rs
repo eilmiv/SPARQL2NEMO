@@ -197,7 +197,8 @@ impl Hash for VarPtr {
 struct PredicatePos {
     /// The associated variable
     variable: VarPtr,
-    /// flags to track properties of that position
+    /// Flags to track properties of that position explicitly.
+    /// These are only the explicit properties, there are more properties inferred in [PredicatePtr::property_at].
     properties: u32,
     /// position in predicate, positions are fixed after initialization
     pos: usize,
@@ -615,6 +616,22 @@ impl Rule {
 
         result
     }
+
+    fn directly_influences(&self, pos: usize) -> HashSet<(PredicatePtr, usize)> {
+        let binding = self.bindings.get(pos).expect(&format!("pos {pos} out of range; arity is {}", self.bindings.len()));
+        match binding {
+            Binding::Variable(_v) => {
+                let mut result = HashSet::new();
+                for bound_pred in &self.body {
+                    for pos in bound_pred.bindings.iter().enumerate().filter(|(_i, b)| *b == binding).map(|(i, _b)| i) {
+                        result.insert((bound_pred.predicate.clone(), pos));
+                    }
+                }
+                result
+            },
+            _ => HashSet::new()
+        }
+    }
 }
 
 struct VariableTranslator {
@@ -734,6 +751,16 @@ impl Predicate {
     pub fn property_at(&self, property: u32, pos: usize) -> bool {
         (self.pos_at(pos).properties & property) == property
     }
+
+    pub fn unset_property(&mut self, property: u32, pos: usize) {
+        let msg = format!(
+            "Invalid position for unsetting property {property} at pos {pos}, {} has arity {}",
+            self.label,
+            self.positions.len()
+        );
+        let predicate_pos = self.positions.get_mut(pos).expect(&msg);
+        predicate_pos.properties &= !property;
+    }
 }
 
 struct UniqueStrings {
@@ -852,10 +879,54 @@ impl PredicatePtr {
         p.var_at(pos)
     }
 
-    /// See also [Predicate::property_at]
+    fn directly_influences_pos(&self, pos: usize) -> HashSet<(PredicatePtr, usize)> {
+        let p = self.ptr.borrow();
+        p.rules.iter().flat_map(|r| r.directly_influences(pos)).collect()
+    }
+
+    pub fn influences_pos(&self, pos: usize) -> HashSet<(PredicatePtr, usize)> {
+        let mut done: HashSet<(PredicatePtr, usize)> = HashSet::new();
+        let mut doing: Vec<(PredicatePtr, usize)> = Vec::new();
+        doing.push((self.clone(), pos));
+
+        while let Some((pred, p)) = doing.pop() {
+            for influencer in pred.directly_influences_pos(p) {
+                if !done.contains(&influencer) && !doing.contains(&influencer) {
+                    doing.push(influencer);
+                }
+            }
+            done.insert((pred, p));
+        }
+
+        done
+    }
+
+    /// This is based on [Predicate::property_at]
+    /// Additional properties are recursively collected from all [influencing positions](PredicatePtr::influences_pos).
+    /// Note that only [explicit bindings](BoundPredicate) of [variables](Binding::Variable) are used to collect properties.
+    /// The semantic of a property is that all bindings to a position must have the property.
+    ///
+    /// Example:
+    ///     Suppose `is_even` property is defined as flag `1 << 3`.
+    ///     The semantic would be that all bindings to a position must be even.
+    ///     `a.property_at(is_even, 0)` is `true` by default.
+    ///     A rule `a(?x) :- b(?x) .` would make it false if `b.property_at(is_even, 0)` is known to be false no matter other rules.
+    ///     Explicitly [unsetting](PredicatePtr::unset_property) would also make it `false`.
     pub fn property_at(&self, property: u32, pos: usize) -> bool {
         let p = self.ptr.borrow();
-        p.property_at(property, pos)
+        if !p.property_at(property, pos) { return false }
+        for (dependency, dependency_pos) in self.influences_pos(pos) {
+            let p = dependency.ptr.borrow();
+            if !p.property_at(property, dependency_pos) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    pub fn unset_property(&self, property: u32, pos: usize) {
+        let mut p = self.ptr.borrow_mut();
+        p.unset_property(property, pos);
     }
 
     /// Gets NEMO program for the predicate including dependencies
