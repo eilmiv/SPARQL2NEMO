@@ -119,6 +119,19 @@ fn nemo_working() -> Result<(), Error>{
     )
 }
 
+
+//#[test]
+fn nemo_not_working() -> Result<(), Error>{
+    assert_nemo(
+        "out(DATATYPE(4/?a)) :- in(?a), ?a >= 1.\n@output out .".to_string(),
+        "
+            @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+            in(7) .
+        ",
+        "\"bar\""
+    )
+}
+
 #[test]
 fn bgp_simple() -> Result<(), Error> {
     assert_sparql(
@@ -546,11 +559,21 @@ fn filter() -> Result<(), Error> {
         ",
         "
             @prefix ex: <https://example.com/> .
+            @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+            dummy(1) .
 
             input_graph(1, ex:p, 0) .
             input_graph(2, ex:p, 1) .
+            input_graph(3, ex:p, 0.0) .
+            input_graph(4, ex:p, 1.0) .
+            input_graph(5, ex:p, \"true\"^^xsd:boolean) .
+            input_graph(6, ex:p, \"false\"^^xsd:boolean) .
+            input_graph(7, ex:p, \"abc\") .
+            input_graph(8, ex:p, \"\") .
+            input_graph(9, ex:p, ex:xyz) .
+            input_graph(0, ex:p, !x) :- dummy(1) .
          ",
-        "2"
+        "2; 4; 5; 7"
     )
 }
 
@@ -797,6 +820,50 @@ fn in_expression() -> Result<(), Error> {
     )
 }
 
+#[test]
+fn in_with_error() -> Result<(), Error> {
+    assert_sparql(
+        "
+            prefix ex: <https://example.com/>
+
+            SELECT DISTINCT ?a
+            WHERE
+            {
+                ?a ex:p ?x .
+                FILTER(?x in (5, STRLEN(4), 1/0.0))
+            }
+        ",
+        "
+            @prefix ex: <https://example.com/> .
+
+            input_graph(1, ex:p, 5) .
+         ",
+        "1"
+    )
+}
+
+#[test]
+fn not_in_with_error() -> Result<(), Error> {
+    assert_sparql(
+        "
+            prefix ex: <https://example.com/>
+
+            SELECT DISTINCT ?a
+            WHERE
+            {
+                ?a ex:p ?x .
+                FILTER(?x not in (3, 1/0))
+            }
+        ",
+        "
+            @prefix ex: <https://example.com/> .
+
+            input_graph(1, ex:p, 2) .
+         ",
+        ""
+    )
+}
+
 
 #[test]
 fn exists() -> Result<(), Error> {
@@ -1040,6 +1107,98 @@ fn str_functions() -> Result<(), Error> {
     )
 }
 
+
+#[test]
+fn datetime_functions() -> Result<(), Error> {
+    assert_sparql(
+        "
+            prefix ex: <https://example.com/>
+
+            SELECT DISTINCT ?a ?datatype ?year ?month ?day ?hours ?minutes ?seconds
+            WHERE
+            {
+                ?a ex:p ?x .
+                BIND(datatype(?x) as ?datatype)
+                BIND(year(?x) as ?year)
+                BIND(month(?x) as ?month)
+                BIND(day(?x) as ?day)
+                BIND(hours(?x) as ?hours)
+                BIND(minutes(?x) as ?minutes)
+                BIND(seconds(?x) as ?seconds)
+            }
+        ",
+        "
+            @prefix ex: <https://example.com/> .
+            @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+            input_graph(1, ex:p, \"2002-10-11T12:00:00-05:00\"^^xsd:dateTime) .
+            input_graph(2, ex:p, \"-2002-11-10T12:00:01.555+05:00\"^^xsd:dateTime) .
+            input_graph(3, ex:p, \"002-10-10T12:09:00Z\"^^xsd:dateTime) .
+         ",
+        "
+            1, <http://www.w3.org/2001/XMLSchema#dateTime>, 2002, 10, 11, 12, 0, \"0\"^^<http://www.w3.org/2001/XMLSchema#double>
+            2, <http://www.w3.org/2001/XMLSchema#dateTime>, -2002, 11, 10, 12, 0, \"1.555\"^^<http://www.w3.org/2001/XMLSchema#double>
+            3, <http://www.w3.org/2001/XMLSchema#dateTime>, 2, 10, 10, 12, 9, \"0\"^^<http://www.w3.org/2001/XMLSchema#double>
+        "
+    )
+}
+
+#[test]
+fn datetime_functions_invalid() -> Result<(), Error> {
+    assert_sparql(
+        "
+            prefix ex: <https://example.com/>
+
+            SELECT DISTINCT ?a ?year
+            WHERE
+            {
+                ?a ex:p ?x .
+                BIND(year(?x) as ?year)
+            }
+        ",
+        "
+            @prefix ex: <https://example.com/> .
+            @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+            input_graph(1, ex:p, \"2002-10-11T12:00:00-05:00\"^^xsd:dateTime) .
+            input_graph(2, ex:p, \"-2002-11-10T12:00:01.555+05:00\") .
+            input_graph(3, ex:p, 24) .
+         ",
+        "
+            1, 2002
+            2, _:0
+            3, _:1
+        "
+    )
+}
+
+#[test]
+fn bnode() -> Result<(), Error> {
+    assert_sparql(
+        "
+            prefix ex: <https://example.com/>
+
+            SELECT DISTINCT ?a ?bnode
+            WHERE
+            {
+                ?a ex:p ?x .
+                BIND(bnode() as ?bnode)
+            }
+        ",
+        "
+            @prefix ex: <https://example.com/> .
+            @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+            input_graph(1, ex:p, 2) .
+            input_graph(2, ex:p, 2) .
+         ",
+        "
+            1, _:0
+            2, _:0
+        "
+    )
+}
+
 #[test]
 fn lang() -> Result<(), Error> {
     // this tests things that are not standard compliant
@@ -1164,6 +1323,30 @@ fn node_type_checks() -> Result<(), Error> {
             input_graph(ex:s, ex:p, 2) .
          ",
         "<https://example.com/o>, _:0, \"a\", 2"
+    )
+}
+
+/// an alternative spelling for isIRI
+#[test]
+fn is_uri() -> Result<(), Error> {
+    assert_sparql(
+        "
+            prefix ex: <https://example.com/>
+
+            SELECT DISTINCT ?iri
+            WHERE
+            {
+                ex:s ex:p ?iri .
+                FILTER(isURI(?iri))
+            }
+        ",
+        "
+            @prefix ex: <https://example.com/> .
+
+            input_graph(ex:s, ex:p, ex:o) .
+            input_graph(ex:s, ex:p, 2) .
+         ",
+        "<https://example.com/o>"
     )
 }
 

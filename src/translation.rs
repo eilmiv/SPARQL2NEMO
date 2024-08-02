@@ -5,12 +5,15 @@ use spargebra::Query;
 use spargebra::term::{BlankNode, GroundTerm, Literal, NamedNode, NamedNodePattern, TermPattern, TriplePattern, Variable};
 use crate::error::TranslateError;
 use crate::error::TranslateError::{AggregationNotImplemented, ExpressionNotImplemented, MultiPatternNotImplemented, PatternNotImplemented, SequencePatternNotImplemented};
-use crate::nemo_model::{add_rule, Binding, BoundPredicate, Call, construct_program, get_vars, hash_dedup, nemo_add, nemo_atoms, nemo_call, nemo_condition, nemo_def, nemo_filter, nemo_predicate_type, nemo_terms, nemo_var, PredicatePtr, ProtoPredicate, Rule, to_bound_predicate, TypedPredicate, VarPtr};
+use crate::nemo_model::{add_rule, Binding, BoundPredicate, Call, construct_program, get_vars, hash_dedup, nemo_add, nemo_atoms, nemo_call, nemo_condition, nemo_def, nemo_filter, nemo_iri, nemo_predicate_type, nemo_terms, nemo_var, PredicatePtr, ProtoPredicate, Rule, to_bound_predicate, TypedPredicate, VarPtr};
 
 nemo_predicate_type!(SolutionSet = ...);
 nemo_predicate_type!(SolutionMultiSet = count ...);
 nemo_predicate_type!(SolutionSequence = index ...);
 nemo_predicate_type!(SolutionExpression = ... result);
+
+/// Flag for property of predicate position to never be undefined.
+const IS_DEFINED: u32 = 1 << 0;
 
 impl SolutionExpression {
     fn depend_vars(&self) -> Vec<VarPtr> {
@@ -21,6 +24,11 @@ impl SolutionExpression {
     fn result_var(&self) -> VarPtr {
         let vars = self.get_predicate().vars();
         vars.last().expect("expression needs to have result").clone()
+    }
+
+    fn mark_nullable(&self) {
+        let vars = self.get_predicate().vars();
+        self.get_predicate().unset_property(IS_DEFINED, vars.len() - 1);
     }
 }
 
@@ -70,11 +78,24 @@ impl VariableTranslator {
 struct QueryTranslator {
     sparql_vars: VariableTranslator,
     input_graph: PredicatePtr,
+    undefined_val: SolutionExpression,
+    strict_undefined: bool,
 }
 
 impl QueryTranslator {
     fn new(input_graph: PredicatePtr) -> QueryTranslator {
-        QueryTranslator{sparql_vars: VariableTranslator::new(), input_graph}
+        let human_readable_undef = true;
+        let undefined_val = if human_readable_undef {
+            nemo_def!(undefined_val(nemo_iri!(UNDEF)) :- {nemo_atoms![]}; SolutionExpression);
+            undefined_val
+        } else {
+            let some_bnode = nemo_var!(!undef);
+            nemo_def!(undefined_val(some_bnode) :- {nemo_atoms![]}; SolutionExpression);
+            undefined_val
+        };
+        undefined_val.mark_nullable();
+
+        QueryTranslator{sparql_vars: VariableTranslator::new(), input_graph, undefined_val, strict_undefined: false}
     }
 
     fn triple_set(&self) -> SolutionSet {
@@ -87,8 +108,10 @@ impl QueryTranslator {
 
     fn translate_expression_variable(&mut self, var: &Variable, binding: &dyn TypedPredicate) -> Result<SolutionExpression, TranslateError> {
         let var_binding = self.sparql_vars.get(var);
+        let undef = self.undefined_val.clone();
+        nemo_def!(var_strict(var_binding; @result: var_binding) :- binding(??set_contains_var), ~undef(var_binding); SolutionExpression);
         nemo_def!(var(var_binding; @result: var_binding) :- binding(??set_contains_var); SolutionExpression);
-        Ok(var)
+        if self.strict_undefined { Ok(var_strict) } else { Ok(var) }
     }
 
     fn translate_expression_named_node(&mut self, node: &NamedNode) -> Result<SolutionExpression, TranslateError> {
@@ -103,18 +126,20 @@ impl QueryTranslator {
         Ok(named_node)
     }
 
-    fn translate_binary_function(&mut self, func: &str, left: &SolutionExpression, right: &SolutionExpression, binding: &dyn TypedPredicate) -> Result<SolutionExpression, TranslateError> {
-        let l = nemo_var!(l);
-        let r = nemo_var!(r);
-        let call = Call::new(func, vec![l.clone(), r.clone()]);
-        nemo_def!(
-            binary_func(??vars, ??left_vars, ??right_vars; @result: call) :-
-                binding(??vars, ??left_vars, ??right_vars, ??other_vars),
-                left(??vars, ??left_vars; @result: l),
-                right(??vars, ??right_vars; @result: r)
-            ; SolutionExpression
-        );
-        Ok(binary_func)
+    fn translate_or(&mut self, left: &SolutionExpression, right: &SolutionExpression, binding: &dyn TypedPredicate) -> Result<SolutionExpression, TranslateError> {
+        let or = SolutionExpression::create("or", nemo_terms![left.depend_vars(), right.depend_vars(), VarPtr::new("result")].vars());
+        nemo_add!(or(??left, ??right; @result: true) :- left(??left; @result: true), binding(??left, ??right, ??other));
+        nemo_add!(or(??left, ??right; @result: true) :- right(??right; @result: true), binding(??left, ??right, ??other));
+        nemo_add!(or(??both, ??left, ??right; @result: false) :- left(??both, ??left; @result: false), right(??both, ??right; @result: false), binding(??both, ??left, ??right, ??other));
+        Ok(or)
+    }
+
+    fn translate_and(&mut self, left: &SolutionExpression, right: &SolutionExpression, binding: &dyn TypedPredicate) -> Result<SolutionExpression, TranslateError> {
+        let and = SolutionExpression::create("and", nemo_terms![left.depend_vars(), right.depend_vars(), VarPtr::new("result")].vars());
+        nemo_add!(and(??left, ??right; @result: false) :- left(??left; @result: false), binding(??left, ??right, ??other));
+        nemo_add!(and(??left, ??right; @result: false) :- right(??right; @result: false), binding(??left, ??right, ??other));
+        nemo_add!(and(??both, ??left, ??right; @result: true) :- left(??both, ??left; @result: true), right(??both, ??right; @result: true), binding(??both, ??left, ??right, ??other));
+        Ok(and)
     }
 
     fn translate_not(&mut self, inner: &SolutionExpression) -> Result<SolutionExpression, TranslateError> {
@@ -142,6 +167,14 @@ impl QueryTranslator {
         Ok(bool_by_cases)
     }
 
+    /// info:
+    /// - Equality should be done for different types, but is not. See https://www.w3.org/TR/sparql11-query/#OperatorMapping
+    ///     - datetime not supported
+    ///     - some conversions not supported e.g. int to double!
+    /// - handles zero length list correctly
+    /// - errors may be hidden if thing is in list or may propagate (this is correct)
+    ///     - divide by zero produces error correctly; infinity panics -> bad
+    /// - Expressions never produce unbound results, therefore no handling of unbound (unbound == error)
     fn translate_in(&mut self, inner: &SolutionExpression, list: &Vec<SolutionExpression>, binding: &dyn TypedPredicate) -> Result<SolutionExpression, TranslateError> {
         // FALSE CASE
         let mut false_conditions = nemo_atoms![];
@@ -167,8 +200,9 @@ impl QueryTranslator {
         Ok(in_expression)
     }
 
-    /// notes
+    /// info
     /// - "... all operators operate on RDF Terms and will produce a type error if any arguments are unbound."
+    ///     - this is ensured by expressions never producing unbound results
     fn translate_binary_operator(&mut self, l: Binding, r: Binding, result: Binding, left_solution: &SolutionExpression, right_solution: &SolutionExpression, binding: &dyn TypedPredicate) -> Result<SolutionExpression, TranslateError>{
         nemo_def!(
             op(??vars, ??left, ??right; @result: result) :-
@@ -185,7 +219,7 @@ impl QueryTranslator {
         Ok(partial_exists)
     }
 
-    /// notes
+    /// info
     /// - Consider current bindings to restrict and therefore optimize inner pattern for EXISTS
     fn translate_exists(&mut self, pattern_solution: &SolutionSet, binding: &dyn TypedPredicate) -> Result<SolutionExpression, TranslateError> {
         let partial_exists = self.translate_positive_exists(pattern_solution, binding)?;
@@ -194,6 +228,9 @@ impl QueryTranslator {
         Ok(exists)
     }
 
+    /// info:
+    /// - this behaves exactly as if only one branch would ever be evaluated
+    /// - an error in the condition results in an error
     fn translate_if(&mut self, condition: &SolutionExpression, true_val: &SolutionExpression, false_val: &SolutionExpression, binding: &dyn TypedPredicate) -> Result<SolutionExpression, TranslateError> {
         let vars = nemo_terms!(condition.depend_vars(), true_val.depend_vars(), false_val.depend_vars(), VarPtr::new("result")).vars();
         let if_expression = SolutionExpression::create("if_expression", vars);
@@ -212,9 +249,10 @@ impl QueryTranslator {
         Ok(if_expression)
     }
 
-    /// notes
-    /// - effective boolean value calculation for named nodes (IRIs) seems wrong, they are neither true nor false
-    /// - note that the bool false case was wrong but tests didn't fail -> maybe add some more tests
+    /// info
+    /// - would be false for invalid literals and NaN, but nemo has no invalid literals or NaN
+    /// - effective boolean value calculation for named nodes (IRIs) and all other nodes are type errors
+    /// - special handling because no automatic float-int conversion, current implementation
     fn translate_effective_boolean_value(&mut self, expression: &SolutionExpression) -> Result<SolutionExpression, TranslateError> {
         // bools
         nemo_def!(effective_boolean_value(??vars; @result: false) :- expression(??vars; @result: ?v), {nemo_filter!("", ?v, " = ", false, "")}; SolutionExpression);
@@ -225,8 +263,9 @@ impl QueryTranslator {
         nemo_add!(effective_boolean_value(??vars; @result: true) :- expression(??vars; @result: ?v), {nemo_filter!("STRLEN(", ?v, ") > 0")});
 
         // numbers
-        nemo_add!(effective_boolean_value(??vars; @result: false) :- expression(??vars; @result: ?v), {nemo_filter!("", ?v, " = 0")});
-        nemo_add!(effective_boolean_value(??vars; @result: true) :- expression(??vars; @result: ?v), {nemo_filter!("", ?v, " != 0")}, {nemo_filter!("isNumeric(", ?v, ") = ", true, "")});
+        nemo_add!(effective_boolean_value(??vars; @result: false) :- expression(??vars; @result: ?v), {nemo_condition!(?v, " >= ", 0)}, {nemo_condition!(?v, " <= ", 0)});
+        nemo_add!(effective_boolean_value(??vars; @result: true) :- expression(??vars; @result: ?v), {nemo_condition!(?v, " > ", 0)});
+        nemo_add!(effective_boolean_value(??vars; @result: true) :- expression(??vars; @result: ?v), {nemo_condition!(?v, " < ", 0)});
 
         Ok(effective_boolean_value)
     }
@@ -263,14 +302,62 @@ impl QueryTranslator {
         Ok(solution)
     }
 
-    /// notes
-    /// - check if date function could be implemented
-    /// - "Apart from BOUND, COALESCE, NOT EXISTS and EXISTS, all functions and operators operate on RDF Terms and will produce a type error if any arguments are unbound."
-    /// - "Any expression other than logical-or (||) or logical-and (&&) that encounters an error will produce that error."
-    /// - ??? Impossible functions (that error for all inputs in NEMO, e.g. date functions) produce unbound predicates
+    /// info:
+    /// - Note negative years exist -> pass the reversed date string
+    /// - seconds should be decimal not double
+    fn date_function(&mut self, expressions: &Vec<SolutionExpression>, func: &Function, parameter_expressions: &Vec<Expression>) -> Result<SolutionExpression, TranslateError> {
+        let (is_time, offset) = match func {
+            Function::Year => (false, 2),
+            Function::Month => (false, 1),
+            Function::Day => (false, 0),
+            Function::Hours => (true, 0),
+            Function::Minutes => (true, 1),
+            Function::Seconds => (true, 2),
+            _ => Err(TranslateError::FunctionNotImplemented(func.clone()))?
+        };
+        if expressions.len() != 1 {Err(TranslateError::InvalidNumberOfArguments(func.clone(), parameter_expressions.clone()))?}
+        let date = expressions.get(0).unwrap();
+
+        let var = nemo_var!(date);
+        let mut call = nemo_call!(STR; var);
+        let mut separator = "-";
+        if is_time {
+            call = nemo_call!(STRAFTER; call, "T");
+            separator = ":";
+        } else {
+            call = nemo_call!(STRBEFORE; call, "T");
+            call = nemo_call!(STRREV; call);
+        }
+        let mut offset_counter = offset;
+        while offset_counter > 0 { call = nemo_call!(STRAFTER; call, separator); offset_counter -= 1;}
+        if offset < 2 {call = nemo_call!(STRBEFORE; call, separator);}
+        if !is_time {call = nemo_call!(STRREV; call);}
+        if is_time && offset == 2 {
+            // parse seconds seconds
+            // remove time zone
+            call = nemo_call!(STRBEFORE; nemo_call!(CONCAT; call, "+"), "+");
+            call = nemo_call!(STRBEFORE; nemo_call!(CONCAT; call, "-"), "-");
+            call = nemo_call!(STRBEFORE; nemo_call!(CONCAT; call, "Z"), "Z");
+            call = nemo_call!(DOUBLE; call);
+        } else {
+            call = nemo_call!(INT; call);
+        }
+        nemo_def!(extract_date(??vars; @result: call) :- date(??vars; @result: var), {nemo_condition!(nemo_call!(DATATYPE; var), " = ", nemo_iri!("http://www.w3.org/2001/XMLSchema#dateTime"))}; SolutionExpression);
+        Ok(extract_date)
+    }
+
+    /// info
+    /// - "Apart from BOUND, COALESCE, NOT EXISTS and EXISTS, all functions and operators operate on RDF Terms and will produce a type error if any arguments are unbound." -> because expressions never return undef
+    /// - "Any expression other than logical-or (||) or logical-and (&&) that encounters an error will produce that error." -> yes because failing to bind expression inputs is error
     /// - round function is not standard compliant
-    /// - stringreverse in nemo but not in my implementation
-    /// - bnode creation would be possible
+    /// - bnode creation would be possible -> only without parameters
+    ///     - creates only single fact with is consistent with blazegraph, also when part of a larger expression that uses other variables (Virtuoso raises "Built-in function is not implemented")
+    /// - lang does not return "" on simple literal
+    /// - preserving lang and xsd:string vs plain string not implemented in nemo
+    /// - SUBSTR parameters are derived int in SPARQL and nemo but double in XPath
+    /// - sum, min, max work in theory on xs:anyAtomicType for sum at least this means that there must be the case of error and so maybe not supporting everything is ok
+    /// - there is fn:reverse however those work on sequences and SPARQL defines to translate to call on sequence of "single node" and there is even an example:
+    ///     - fn:reverse(("hello")) returns ("hello").
     fn translate_function(&mut self, func: &Function, parameter_expressions: &Vec<Expression>, binding: &dyn TypedPredicate) -> Result<SolutionExpression, TranslateError> {
         let params = parameter_expressions.iter().map(|e| self.translate_expression(e, binding)).collect::<Result<Vec<_>, _>>()?;
         match func {
@@ -279,7 +366,14 @@ impl QueryTranslator {
             // LangMatches -> language tag matches a lang range e.g. en-US, de-*
             Function::Datatype => self.function(&params, binding, "DATATYPE"),
             // Iri
-            // BNode
+            // StrLang -> constructs lang string
+            // StrDt -> constructs literal with datatype
+            Function::BNode => {
+                if params.is_empty() {
+                    nemo_def!(bnode(nemo_var!(!bnode)) :- {nemo_atoms![]}; SolutionExpression);
+                    Ok(bnode)
+                } else {Err(TranslateError::FunctionNotImplemented(func.clone()))}
+            },
             // Rand
             Function::Abs => self.function(&params, binding, "ABS"),
             Function::Ceil => self.function(&params, binding, "CEIL"),
@@ -301,24 +395,12 @@ impl QueryTranslator {
             Function::StrEnds => self.function(&params, binding, "STRENDS"),
             Function::StrBefore => self.function(&params, binding, "STRBEFORE"),
             Function::StrAfter => self.function(&params, binding, "STRAFTER"),
-            // Year
-            // Month
-            // Day
-            // Hours
-            // Minutes
-            // Seconds
+            Function::Year | Function::Month | Function::Day | Function::Hours | Function::Minutes | Function::Seconds => self.date_function(&params, func, parameter_expressions),
             // Timezone -> timezone as dayTimeDuration
             // Tz -> timezone as simple literal
             // Now
-            // Uuid
-            // StrUuid
-            // Md5
-            // Sha1
-            // Sha256
-            // Sha384
-            // Sha512
-            // StrLang -> constructs lang string
-            // StrDt -> constructs literal with datatype
+            // Uuid, StrUuid
+            // Md5, Sha1, Sha256, Sha384, Sha512
             Function::IsIri => self.function(&params, binding, "isIri"),
             Function::IsBlank => self.function(&params, binding, "isNull"),
             Function::IsLiteral => {
@@ -329,11 +411,7 @@ impl QueryTranslator {
             }
             Function::IsNumeric => self.function(&params, binding, "isNumeric"),
             Function::Regex => self.function(&params, binding, "REGEX"),
-            // Triple
-            // Subject
-            // Predicate
-            // Object
-            // IsTriple
+            // Triple, Subject, Predicate, Object, IsTriple
             // Adjust -> no clue what this is
             Function::Custom(func_iri) => {
                 match func_iri.as_str() {
@@ -341,7 +419,6 @@ impl QueryTranslator {
                     "http://www.w3.org/2005/xpath-functions/math#sin" => self.function(&params, binding, "SIN"),
                     "http://www.w3.org/2005/xpath-functions/math#cos" => self.function(&params, binding, "COS"),
                     "http://www.w3.org/2005/xpath-functions/math#tan" => self.function(&params, binding, "TAN"),
-                    // round
                     // "http://www.w3.org/2005/xpath-functions/math#log" => self.function(&params, binding, "LOG"), // no IRI for log x base y known
                     "http://www.w3.org/2005/xpath-functions/math#pow" => self.function(&params, binding, "POW"),
                     // rem
@@ -353,6 +430,7 @@ impl QueryTranslator {
                     // bitand
                     // bitor
                     // bitxor
+                    // STRREV
                     _ => Err(TranslateError::FunctionNotImplemented(func.clone()))
                 }
             }
@@ -363,6 +441,11 @@ impl QueryTranslator {
     /// notes
     /// - implement COALESCE -> requires negation or aggregation if errors are represented by missing facts
     /// - Better error handling in boolean operations, the current implementation using OR, and AND does not handle errors correctly; maybe check all the functions for error handling...
+    /// info:
+    /// - nemos AND and OR functions handle errors not correctly
+    /// - comparisons not implemented for strings
+    /// - nemo has no unary operators -> implement anyway
+    /// - divide produces always int but is decimal in SPARQL when dividing ints
     fn translate_expression(&mut self, expression: &Expression, binding: &dyn TypedPredicate) -> Result<SolutionExpression, TranslateError> {
         match expression {
             Expression::Variable(v) => self.translate_expression_variable(v, binding),
@@ -371,12 +454,12 @@ impl QueryTranslator {
             Expression::Or(left, right) => {
                 let left_solution = self.translate_bool_expression(left, binding)?;
                 let right_solution = self.translate_bool_expression(right, binding)?;
-                self.translate_binary_function("OR", &left_solution, &right_solution, binding)
+                self.translate_or(&left_solution, &right_solution, binding)
             },
             Expression::And(left, right) => {
                 let left_solution = self.translate_bool_expression(left, binding)?;
                 let right_solution = self.translate_bool_expression(right, binding)?;
-                self.translate_binary_function("AND", &left_solution, &right_solution, binding)
+                self.translate_and(&left_solution, &right_solution, binding)
             },
             Expression::Not(inner) => {
                 let inner_solution = self.translate_bool_expression(inner, binding)?;
