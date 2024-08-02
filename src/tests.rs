@@ -121,7 +121,7 @@ fn nemo_working() -> Result<(), Error>{
 
 
 //#[test]
-fn nemo_not_working() -> Result<(), Error>{
+fn _nemo_not_working() -> Result<(), Error>{
     assert_nemo(
         "out(DATATYPE(4/?a)) :- in(?a), ?a >= 1.\n@output out .".to_string(),
         "
@@ -922,6 +922,30 @@ fn not_exists() -> Result<(), Error> {
 }
 
 #[test]
+fn bound() -> Result<(), Error> {
+    assert_sparql(
+        "
+            prefix ex: <https://example.com/>
+
+            SELECT DISTINCT ?x ?y ?err ?x_bound ?un_bound
+            WHERE
+            {
+                ?x ex:p ?y .
+                BIND(?x / ?y as ?err)
+                BIND(bound(?x) as ?x_bound)
+                BIND(bound(?err) as ?un_bound)
+            }
+        ",
+        "
+            @prefix ex: <https://example.com/> .
+
+            input_graph(1, ex:p, 0) .
+         ",
+        "1, 0, UNDEF, \"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>, \"false\"^^<http://www.w3.org/2001/XMLSchema#boolean>"
+    )
+}
+
+#[test]
 fn if_expression() -> Result<(), Error> {
     assert_sparql(
         "
@@ -1059,7 +1083,7 @@ fn round() -> Result<(), Error> {
             "2, \"3\"^^<http://www.w3.org/2001/XMLSchema#double>",
             "3, \"3\"^^<http://www.w3.org/2001/XMLSchema#double>",
             "4, \"-3\"^^<http://www.w3.org/2001/XMLSchema#double>",  // standard would be -2
-            "5, _:0"  // this needs to change when handling undefined values better
+            "5, UNDEF"
         ].join("\n"),
     )
 }
@@ -1166,8 +1190,8 @@ fn datetime_functions_invalid() -> Result<(), Error> {
          ",
         "
             1, 2002
-            2, _:0
-            3, _:1
+            2, UNDEF
+            3, UNDEF
         "
     )
 }
@@ -1219,7 +1243,7 @@ fn lang() -> Result<(), Error> {
             input_graph(1, ex:p, \"a\") .
             input_graph(2, ex:p, \"a\"@de) .
          ",
-        "1, _:0; 2, \"de\""  // should be empty string instead of null by standard
+        "1, UNDEF; 2, \"de\""  // should be empty string instead of undef by standard
     )
 }
 
@@ -1538,7 +1562,7 @@ fn union_unbound() -> Result<(), Error> {
             input_graph(4, ex:p, 44) .
             input_graph(5, ex:q, ex:o) .
          ",
-        "1, 11; 2, _:0; 4, 44; 5, _:1"
+        "1, 11; 2, UNDEF; 4, 44; 5, UNDEF"
     )
 }
 
@@ -1585,7 +1609,7 @@ fn bind_with_expression_error() -> Result<(), Error> {
             input_graph(1, ex:p, 5) .
             input_graph(2, ex:p, ex:nan) .
          ",
-        "1, 5; 2, _:0"
+        "1, 5; 2, UNDEF"
     )
 }
 

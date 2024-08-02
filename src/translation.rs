@@ -5,7 +5,7 @@ use spargebra::Query;
 use spargebra::term::{BlankNode, GroundTerm, Literal, NamedNode, NamedNodePattern, TermPattern, TriplePattern, Variable};
 use crate::error::TranslateError;
 use crate::error::TranslateError::{AggregationNotImplemented, ExpressionNotImplemented, MultiPatternNotImplemented, PatternNotImplemented, SequencePatternNotImplemented};
-use crate::nemo_model::{add_rule, Binding, BoundPredicate, Call, construct_program, get_vars, hash_dedup, nemo_add, nemo_atoms, nemo_call, nemo_condition, nemo_def, nemo_filter, nemo_iri, nemo_predicate_type, nemo_terms, nemo_var, PredicatePtr, ProtoPredicate, Rule, to_bound_predicate, TypedPredicate, VarPtr};
+use crate::nemo_model::{add_rule, Binding, BoundPredicate, Call, construct_program, get_vars, has_prop_for_var, hash_dedup, nemo_add, nemo_atoms, nemo_call, nemo_condition, nemo_def, nemo_filter, nemo_iri, nemo_predicate_type, nemo_terms, nemo_var, PredicatePtr, ProtoPredicate, Rule, to_bound_predicate, TypedPredicate, VarPtr};
 
 nemo_predicate_type!(SolutionSet = ...);
 nemo_predicate_type!(SolutionMultiSet = count ...);
@@ -228,6 +228,16 @@ impl QueryTranslator {
         Ok(exists)
     }
 
+    fn translate_bound(&mut self, var: &Variable, binding: &dyn TypedPredicate) -> Result<SolutionExpression, TranslateError> {
+        let nemo_var = self.sparql_vars.get(var);
+        let unbound = self.undefined_val.clone();
+        nemo_def!(bound(nemo_var; @result: true) :- binding(??vars), ~unbound(nemo_var); SolutionExpression);
+        if !has_prop_for_var(binding, IS_DEFINED, &nemo_var) {
+            nemo_add!(bound(nemo_var; @result: false) :- unbound(nemo_var), binding(??vars));
+        }
+        Ok(bound)
+    }
+
     /// info:
     /// - this behaves exactly as if only one branch would ever be evaluated
     /// - an error in the condition results in an error
@@ -280,7 +290,7 @@ impl QueryTranslator {
             Expression::Equal(_, _) | Expression::SameTerm(_, _) |
             Expression::Greater(_, _) | Expression::GreaterOrEqual(_, _) |
             Expression::Less(_, _) | Expression::LessOrEqual(_, _) |
-            Expression::In(_, _) | Expression::Exists(_) |
+            Expression::In(_, _) | Expression::Exists(_) | Expression::Bound(_) |
             Expression::Not(_) | Expression::Or(_, _) | Expression::And(_, _) |
             Expression::FunctionCall(Function::IsBlank, _) |
             Expression::FunctionCall(Function::IsNumeric, _) |
@@ -567,8 +577,10 @@ impl QueryTranslator {
             Expression::Exists(pattern) => {
                 let pattern_solution = self.translate_pattern(pattern)?;
                 self.translate_exists(&pattern_solution, binding)
-            }
-            // bound
+            },
+            Expression::Bound(var) => {
+                self.translate_bound(var, binding)
+            },
             Expression::If(cond, true_val, false_val) => {
                 let cond_solution = self.translate_bool_expression(cond, binding)?;
                 let true_solution = self.translate_expression(true_val, binding)?;
@@ -791,30 +803,30 @@ impl QueryTranslator {
         Ok(filter)
     }
 
-    /// notes
-    /// - ??? represent union of solutions with differently bound variables
+    /// info:
+    /// - in a simple world without unbound variables this could also just work on compatible bindings
     fn translate_union(&mut self, left: &SolutionSet, right: &SolutionSet) -> Result<SolutionSet, TranslateError> {
-        let left_vars = get_vars(left);
-        let right_vars = get_vars(right);
-        let all_vars = hash_dedup(&left_vars.iter().chain(&right_vars).map(|v| v.clone()).collect());
-        let union = SolutionSet::create("union", all_vars.iter().map(|v| v.clone()).collect());
-        let left_bindings = all_vars.iter().map(
-            |v| if left_vars.contains(v) {Binding::from(v)} else {Binding::Existential(v.clone())}
-        ).collect();
-        let right_bindings = all_vars.iter().map(
-            |v| if right_vars.contains(v) {Binding::from(v)} else {Binding::Existential(v.clone())}
-        ).collect();
-        add_rule(&union, Rule::new(left_bindings, vec![to_bound_predicate(left)], vec![]));
-        add_rule(&union, Rule::new(right_bindings, vec![to_bound_predicate(right)], vec![]));
+        let unbound = VarPtr::new("unbound");
+        let unbound_pred = self.undefined_val.clone();
+        let union = SolutionSet::create("union", nemo_terms![get_vars(left), get_vars(right)].vars());
+        let unbound_other = |other| get_vars(&union).iter().map(|v| if get_vars(other).contains(v) {v.clone()} else {unbound.clone()} ).collect::<Vec<_>>();
+        let left_bindings = unbound_other(left);
+        let right_bindings = unbound_other(right);
+        nemo_add!(union(left_bindings) :- left(??left), unbound_pred(unbound));
+        nemo_add!(union(right_bindings) :- right(??right), unbound_pred(unbound));
         Ok(union)
     }
 
     /// notes
     /// - Test what others do when binding to an already existing variable
+    /// - optimize for known functions that do not error
+    /// info:
+    /// - old implementation with null as unbound using existential rule did not require negation
     fn translate_extend(&mut self, inner: &SolutionSet, var: &Variable, expression: &SolutionExpression) -> Result<SolutionSet, TranslateError> {
         let bound_var = self.sparql_vars.get(var);
+        let unbound = self.undefined_val.clone();
         nemo_def!(extend(??e_vars, ??base_vars, bound_var) :- inner(??e_vars, ??base_vars), expression(??e_vars; @result: bound_var); SolutionSet);
-        nemo_add!(extend(??vars, nemo_var!(!unbound)) :- inner(??vars));
+        nemo_add!(extend(??e_vars, ??base_vars, ?unbound) :- inner(??e_vars, ??base_vars), ~expression(??e_vars; @result: bound_var), unbound(?unbound));
         Ok(extend)
     }
 

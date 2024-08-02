@@ -200,13 +200,11 @@ struct PredicatePos {
     /// Flags to track properties of that position explicitly.
     /// These are only the explicit properties, there are more properties inferred in [PredicatePtr::property_at].
     properties: u32,
-    /// position in predicate, positions are fixed after initialization
-    pos: usize,
 }
 
 impl PredicatePos{
-    pub fn new(pos: usize, variable: VarPtr) -> PredicatePos{
-        PredicatePos{variable, properties: u32::MAX, pos}
+    pub fn new(variable: VarPtr) -> PredicatePos{
+        PredicatePos{variable, properties: u32::MAX}
     }
 }
 
@@ -623,6 +621,7 @@ impl Rule {
             Binding::Variable(_v) => {
                 let mut result = HashSet::new();
                 for bound_pred in &self.body {
+                    if bound_pred.negated { continue };
                     for pos in bound_pred.bindings.iter().enumerate().filter(|(_i, b)| *b == binding).map(|(i, _b)| i) {
                         result.insert((bound_pred.predicate.clone(), pos));
                     }
@@ -717,8 +716,7 @@ impl Predicate {
             label: label.to_string(),
             positions: variables
                 .iter()
-                .enumerate()
-                .map(|(i, v)| PredicatePos::new(i, v.clone()))
+                .map(|v| PredicatePos::new(v.clone()))
                 .collect(),
             rules: vec![],
             facts: vec![],
@@ -903,7 +901,7 @@ impl PredicatePtr {
 
     /// This is based on [Predicate::property_at]
     /// Additional properties are recursively collected from all [influencing positions](PredicatePtr::influences_pos).
-    /// Note that only [explicit bindings](BoundPredicate) of [variables](Binding::Variable) are used to collect properties.
+    /// Note that only non-negated [explicit bindings](BoundPredicate) of [variables](Binding::Variable) are used to collect properties.
     /// The semantic of a property is that all bindings to a position must have the property.
     ///
     /// Example:
@@ -980,6 +978,18 @@ pub fn add_rule(p: &dyn TypedPredicate, rule: Rule){
 
 pub fn get_vars(p: &dyn TypedPredicate) -> Vec<VarPtr>{
     p.get_predicate().vars()
+}
+
+pub fn has_prop(pred: &dyn TypedPredicate, prop: u32, pos: usize) -> bool { pred.get_predicate().property_at(prop, pos) }
+
+pub fn has_prop_for_var(pred: &dyn TypedPredicate, prop: u32, var: &VarPtr) -> bool {
+    let var_poses: Vec<_> = get_vars(pred).iter().enumerate().filter(|(_i, v)| *v == var).map(|(i, _v)| i).collect();
+    for p in var_poses {
+        if !has_prop(pred, prop, p){
+            return false;
+        }
+    }
+    return true;
 }
 
 pub fn to_bound_predicate(p: &dyn TypedPredicate) -> BoundPredicate {
@@ -1199,8 +1209,8 @@ impl ProtoBinding {
                     }
                 }
             },
-            ProtoBinding::VariableSet(s) => panic!("VariableSet \"{s}\" not resolved."),
-            ProtoBinding::RenameSet(s) => panic!("RenameSet \"{s}\" not resolved."),
+            ProtoBinding::VariableSet(_s) => panic!("VariableSet \"{_s}\" not resolved."),
+            ProtoBinding::RenameSet(_s) => panic!("RenameSet \"{_s}\" not resolved."),
             ProtoBinding::BindingList(_l) => panic!("BindingList not resolved."),
             ProtoBinding::Aggregate(name, sub_bindings) => {
                 Binding::Call(Call::new(
@@ -1270,6 +1280,13 @@ impl From<TermSet> for ProtoBinding {
 impl From<&TermSet> for ProtoBinding {
     fn from(value: &TermSet) -> Self {
         ProtoBinding::BindingList(value.bindings())
+    }
+}
+
+/// allows duplication of a variable compared to a [TermSet]
+impl From<&Vec<VarPtr>> for ProtoBinding {
+    fn from(value: &Vec<VarPtr>) -> Self {
+        ProtoBinding::BindingList(value.iter().map(|v| Binding::from(v)).collect())
     }
 }
 
