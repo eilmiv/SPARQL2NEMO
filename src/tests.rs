@@ -120,15 +120,15 @@ fn nemo_working() -> Result<(), Error>{
 }
 
 
-//#[test]
-fn _nemo_not_working() -> Result<(), Error>{
+#[test]
+fn nemo_not_working() -> Result<(), Error>{
     assert_nemo(
-        "out(DATATYPE(4/?a)) :- in(?a), ?a >= 1.\n@output out .".to_string(),
+        "out(DATATYPE(?a)) :- in(?a), DOUBLE(?a) >= DOUBLE(\"false\"^^xsd:boolean) .\n@output out .".to_string(),
         "
             @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
-            in(7) .
+            in(\"true\"^^xsd:boolean) .
         ",
-        "\"bar\""
+        ""
     )
 }
 
@@ -740,6 +740,7 @@ fn comparisons() -> Result<(), Error> {
         ",
         "
             @prefix ex: <https://example.com/> .
+            @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
 
             input_graph(1, ex:p, 0) .
             input_graph(1, ex:q, 1) .
@@ -747,11 +748,44 @@ fn comparisons() -> Result<(), Error> {
             input_graph(2, ex:q, 1) .
             input_graph(3, ex:p, 2) .
             input_graph(3, ex:q, 1) .
+
+            input_graph(4, ex:p, 0.1) .
+            input_graph(4, ex:q, 1) .
+            input_graph(5, ex:p, 1.0) .
+            input_graph(5, ex:q, 1) .
+            input_graph(6, ex:p, 2.1) .
+            input_graph(6, ex:q, 1) .
+
+            input_graph(7, ex:p, \"a\") .
+            input_graph(7, ex:q, \"b\") .
+            input_graph(8, ex:p, \"aaa\") .
+            input_graph(8, ex:q, \"aaa\") .
+            input_graph(9, ex:p, \"aaa\") .
+            input_graph(9, ex:q, \"a\") .
+
+            input_graph(10, ex:p, \"false\"^^xsd:boolean) .
+            input_graph(10, ex:q, \"true\"^^xsd:boolean) .
+            input_graph(11, ex:p, \"true\"^^xsd:boolean) .
+            input_graph(11, ex:q, \"true\"^^xsd:boolean) .
+            input_graph(12, ex:p, \"true\"^^xsd:boolean) .
+            input_graph(12, ex:q, \"false\"^^xsd:boolean) .
          ",
         &vec![
             vec!["1", f, f, t, t, f, t].join(", "),
             vec!["2", f, t, f, t, t, f].join(", "),
             vec!["3", t, t, f, f, f, t].join(", "),
+
+            vec!["4", f, f, t, t, f, t].join(", "),
+            vec!["5", f, t, f, t, t, f].join(", "),
+            vec!["6", t, t, f, f, f, t].join(", "),
+
+            vec!["7", f, f, t, t, f, t].join(", "),
+            vec!["8", f, t, f, t, t, f].join(", "),
+            vec!["9", t, t, f, f, f, t].join(", "),
+
+            vec!["10", f, f, t, t, f, t].join(", "),
+            vec!["11", f, t, f, t, t, f].join(", "),
+            vec!["12", t, t, f, f, f, t].join(", "),
         ].join("; ")
     )
 }
@@ -965,6 +999,33 @@ fn if_expression() -> Result<(), Error> {
             input_graph(2, ex:p, 3) .
          ",
         "0, 1; 3, \"yay\""
+    )
+}
+
+#[test]
+fn coalesce() -> Result<(), Error> {
+    assert_sparql(
+        "
+            prefix ex: <https://example.com/>
+
+            SELECT DISTINCT ?t1 ?t2 ?t3 ?t4 ?t5 ?t6
+            WHERE
+            {
+                ?a ex:p ?x .
+                BIND(COALESCE(?x, 1/0) as ?t1)
+                BIND(COALESCE(1/0, ?x) as ?t2)
+                BIND(COALESCE(5, ?x) as ?t3)
+                BIND(COALESCE(?y, 3) as ?t4)
+                BIND(COALESCE(?y) as ?t5)
+                BIND(COALESCE(?y, 1/0, 7, ?x) as ?t6)
+            }
+        ",
+        "
+            @prefix ex: <https://example.com/> .
+
+            input_graph(1, ex:p, 2) .
+         ",
+        "2, 2, 5, 3, UNDEF, 7"
     )
 }
 
@@ -1428,9 +1489,9 @@ fn left_join() -> Result<(), Error> {
          ",
         "
             1, 11, 12
-            3, 31, _:0
+            3, 31, UNDEF
             4, 41, 42
-            5, 51, _:1
+            5, 51, UNDEF
         "
     )
 }
@@ -1463,10 +1524,10 @@ fn left_join_filter() -> Result<(), Error> {
             input_graph(5, ex:a, 51) .
          ",
         "
-            1, 11, _:0
-            3, 31, _:1
+            1, 11, UNDEF
+            3, 31, UNDEF
             4, 41, 42
-            5, 51, _:2
+            5, 51, UNDEF
         "
     )
 }
@@ -1502,13 +1563,11 @@ fn left_join_positive_exists() -> Result<(), Error> {
         ",
         "
             1, 11, 12
-            3, 31, _:0
-            4, 41, _:1
-            5, 51, _:2
+            3, 31, UNDEF
+            4, 41, UNDEF
+            5, 51, UNDEF
         "
-    )?;
-    assert!(!translate(sparql).unwrap().contains("~"), "Positive exists should not use negation");
-    Ok(())
+    )
 }
 
 #[test]

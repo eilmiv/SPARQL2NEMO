@@ -4,8 +4,8 @@ use spargebra::algebra::{AggregateExpression, Expression, Function, GraphPattern
 use spargebra::Query;
 use spargebra::term::{BlankNode, GroundTerm, Literal, NamedNode, NamedNodePattern, TermPattern, TriplePattern, Variable};
 use crate::error::TranslateError;
-use crate::error::TranslateError::{AggregationNotImplemented, ExpressionNotImplemented, MultiPatternNotImplemented, PatternNotImplemented, SequencePatternNotImplemented};
-use crate::nemo_model::{add_rule, Binding, BoundPredicate, Call, construct_program, get_vars, has_prop_for_var, hash_dedup, nemo_add, nemo_atoms, nemo_call, nemo_condition, nemo_def, nemo_filter, nemo_iri, nemo_predicate_type, nemo_terms, nemo_var, PredicatePtr, ProtoPredicate, Rule, to_bound_predicate, TypedPredicate, VarPtr};
+use crate::error::TranslateError::{AggregationNotImplemented, MultiPatternNotImplemented, PatternNotImplemented, SequencePatternNotImplemented};
+use crate::nemo_model::{add_rule, Binding, BoundPredicate, Call, construct_program, get_vars, has_prop_for_var, hash_dedup, nemo_add, nemo_atoms, nemo_call, nemo_condition, nemo_def, nemo_filter, nemo_iri, nemo_predicate_type, nemo_terms, nemo_var, PredicatePtr, ProtoPredicate, Rule, to_bound_predicate, to_negated_bound_predicate, TypedPredicate, VarPtr};
 
 nemo_predicate_type!(SolutionSet = ...);
 nemo_predicate_type!(SolutionMultiSet = count ...);
@@ -14,6 +14,9 @@ nemo_predicate_type!(SolutionExpression = ... result);
 
 /// Flag for property of predicate position to never be undefined.
 const IS_DEFINED: u32 = 1 << 0;
+
+/// namespaces
+const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
 
 impl SolutionExpression {
     fn depend_vars(&self) -> Vec<VarPtr> {
@@ -79,7 +82,6 @@ struct QueryTranslator {
     sparql_vars: VariableTranslator,
     input_graph: PredicatePtr,
     undefined_val: SolutionExpression,
-    strict_undefined: bool,
 }
 
 impl QueryTranslator {
@@ -95,7 +97,7 @@ impl QueryTranslator {
         };
         undefined_val.mark_nullable();
 
-        QueryTranslator{sparql_vars: VariableTranslator::new(), input_graph, undefined_val, strict_undefined: false}
+        QueryTranslator{sparql_vars: VariableTranslator::new(), input_graph, undefined_val}
     }
 
     fn triple_set(&self) -> SolutionSet {
@@ -106,12 +108,26 @@ impl QueryTranslator {
         move |var: &Variable| self.sparql_vars.get(var)
     }
 
+    fn map_unbound(&self, target: &dyn TypedPredicate, source: &dyn TypedPredicate) -> (BoundPredicate, Vec<VarPtr>) {
+        let unbound = VarPtr::new("unbound");
+        let unbound_predicate = BoundPredicate::new(self.undefined_val.get_predicate(), vec![Binding::from(&unbound)], false);
+        let vars = get_vars(target).iter().map(|v| if get_vars(source).contains(v) {v.clone()} else {unbound.clone()} ).collect::<Vec<_>>();
+        (unbound_predicate, vars)
+    }
+
+    /// info
+    /// - still stratified even tho it includes negation
     fn translate_expression_variable(&mut self, var: &Variable, binding: &dyn TypedPredicate) -> Result<SolutionExpression, TranslateError> {
         let var_binding = self.sparql_vars.get(var);
-        let undef = self.undefined_val.clone();
-        nemo_def!(var_strict(var_binding; @result: var_binding) :- binding(??set_contains_var), ~undef(var_binding); SolutionExpression);
-        nemo_def!(var(var_binding; @result: var_binding) :- binding(??set_contains_var); SolutionExpression);
-        if self.strict_undefined { Ok(var_strict) } else { Ok(var) }
+        if get_vars(binding).contains(&var_binding) {
+            let undef = self.undefined_val.clone();
+            nemo_def!(var(var_binding; @result: var_binding) :- binding(??set_contains_var), ~undef(var_binding); SolutionExpression);
+            Ok(var)
+        }
+        else {
+            let always_error = SolutionExpression::create("always_error", vec![var_binding.clone()]);
+            Ok(always_error)
+        }
     }
 
     fn translate_expression_named_node(&mut self, node: &NamedNode) -> Result<SolutionExpression, TranslateError> {
@@ -165,6 +181,112 @@ impl QueryTranslator {
                 { false_filter }
         );
         Ok(bool_by_cases)
+    }
+
+    /// info
+    /// - true and false should never both apply
+    fn translate_comparison(&mut self, true_op: &str, false_op: &str, str_compare: i32, str_compare_for: bool, left: &SolutionExpression, right: &SolutionExpression, binding: &dyn TypedPredicate) -> Result<SolutionExpression, TranslateError>{
+        // numeric
+        nemo_def!(
+            comparison(??both, ??left, ??right; @result: true) :-
+                binding(??both, ??left, ??right, ??other),
+                left(??both, ??left; @result: ?l),
+                right(??both, ??right; @result: ?r),
+                { nemo_condition!(?l, true_op, ?r) }
+                ; SolutionExpression
+        );
+        nemo_add!(
+            comparison(??both, ??left, ??right; @result: false) :-
+                binding(??both, ??left, ??right, ??other),
+                left(??both, ??left; @result: ?l),
+                right(??both, ??right; @result: ?r),
+                { nemo_condition!(?l, false_op, ?r)  }
+        );
+
+        // boolean
+        let l = nemo_var!(l);
+        let r = nemo_var!(r);
+        nemo_add!(
+            comparison(??both, ??left, ??right; @result: true) :-
+                binding(??both, ??left, ??right, ??other),
+                left(??both, ??left; @result: l),
+                right(??both, ??right; @result: r),
+                { nemo_condition!(nemo_call!(INT; l), true_op, nemo_call!(INT; r)) },
+                { nemo_condition!(nemo_call!(DATATYPE; l), " = ", nemo_iri!(XSD => boolean))},
+                { nemo_condition!(nemo_call!(DATATYPE; r), " = ", nemo_iri!(XSD => boolean))}
+        );
+        nemo_add!(
+            comparison(??both, ??left, ??right; @result: false) :-
+                binding(??both, ??left, ??right, ??other),
+                left(??both, ??left; @result: l),
+                right(??both, ??right; @result: r),
+                { nemo_condition!(nemo_call!(INT; l), false_op, nemo_call!(INT; r)) },
+                { nemo_condition!(nemo_call!(DATATYPE; l), " = ", nemo_iri!(XSD => boolean))},
+                { nemo_condition!(nemo_call!(DATATYPE; r), " = ", nemo_iri!(XSD => boolean))}
+        );
+
+        // string
+        nemo_add!(
+            comparison(??both, ??left, ??right; @result: str_compare_for) :-
+                binding(??both, ??left, ??right, ??other),
+                left(??both, ??left; @result: l),
+                right(??both, ??right; @result: r),
+                { nemo_condition!(nemo_call!(COMPARE; l, r), " = ", str_compare) }
+        );
+        nemo_add!(
+            comparison(??both, ??left, ??right; @result: !str_compare_for) :-
+                binding(??both, ??left, ??right, ??other),
+                left(??both, ??left; @result: l),
+                right(??both, ??right; @result: r),
+                { nemo_condition!(nemo_call!(COMPARE; l, r), " != ", str_compare) }
+        );
+        Ok(comparison)
+    }
+
+    fn translate_equal(&mut self, left: &SolutionExpression, right: &SolutionExpression, binding: &dyn TypedPredicate) -> Result<SolutionExpression, TranslateError>{
+        // numeric
+        nemo_def!(
+            equal(??both, ??left, ??right; @result: true) :-
+                binding(??both, ??left, ??right, ??other),
+                left(??both, ??left; @result: ?l),
+                right(??both, ??right; @result: ?r),
+                { nemo_condition!(?l, " >= ", ?r) },
+                { nemo_condition!(?l, " <= ", ?r) }
+                ; SolutionExpression
+        );
+        nemo_add!(
+            equal(??both, ??left, ??right; @result: false) :-
+                binding(??both, ??left, ??right, ??other),
+                left(??both, ??left; @result: ?l),
+                right(??both, ??right; @result: ?r),
+                { nemo_condition!(?l, " > ", ?r) }
+        );
+        nemo_add!(
+            equal(??both, ??left, ??right; @result: false) :-
+                binding(??both, ??left, ??right, ??other),
+                left(??both, ??left; @result: ?l),
+                right(??both, ??right; @result: ?r),
+                { nemo_condition!(?l, " < ", ?r) }
+        );
+
+        // non numeric
+        nemo_add!(
+            equal(??both, ??left, ??right; @result: true) :-
+                binding(??both, ??left, ??right, ??other),
+                left(??both, ??left; @result: ?l),
+                right(??both, ??right; @result: ?r),
+                { nemo_condition!(?l, " = ", ?r) },
+                { nemo_filter!("AND(isNumeric(", ?l, "), isNumeric(", ?r, ")) = ", false, "")}
+        );
+        nemo_add!(
+            equal(??both, ??left, ??right; @result: false) :-
+                binding(??both, ??left, ??right, ??other),
+                left(??both, ??left; @result: ?l),
+                right(??both, ??right; @result: ?r),
+                { nemo_condition!(?l, " != ", ?r) },
+                { nemo_filter!("AND(isNumeric(", ?l, "), isNumeric(", ?r, ")) = ", false, "")}
+        );
+        Ok(equal)
     }
 
     /// info:
@@ -257,6 +379,19 @@ impl QueryTranslator {
                 false_val(??all, ??val; @result: ?v)
         );
         Ok(if_expression)
+    }
+
+    fn translate_coalesce(&mut self, expressions: Vec<SolutionExpression>, binding: &dyn TypedPredicate) -> Result<SolutionExpression, TranslateError> {
+        let mut not_previous_success = nemo_atoms![];
+        let coalesce = SolutionExpression::create("coalesce", nemo_terms![&expressions => SolutionExpression::depend_vars, VarPtr::new("result")].vars());
+
+        for expr in expressions {
+            let tmp = not_previous_success.flat_clone();
+            nemo_add!(coalesce(nemo_terms!(get_vars(&coalesce))) :- {binding}, expr(??expr_vars; @result: coalesce.result_var()), {not_previous_success});
+            not_previous_success = nemo_atoms![tmp, &to_negated_bound_predicate(&expr)];
+        }
+
+        Ok(coalesce)
     }
 
     /// info
@@ -352,7 +487,7 @@ impl QueryTranslator {
         } else {
             call = nemo_call!(INT; call);
         }
-        nemo_def!(extract_date(??vars; @result: call) :- date(??vars; @result: var), {nemo_condition!(nemo_call!(DATATYPE; var), " = ", nemo_iri!("http://www.w3.org/2001/XMLSchema#dateTime"))}; SolutionExpression);
+        nemo_def!(extract_date(??vars; @result: call) :- date(??vars; @result: var), {nemo_condition!(nemo_call!(DATATYPE; var), " = ", nemo_iri!(XSD => dateTime))}; SolutionExpression);
         Ok(extract_date)
     }
 
@@ -368,6 +503,7 @@ impl QueryTranslator {
     /// - sum, min, max work in theory on xs:anyAtomicType for sum at least this means that there must be the case of error and so maybe not supporting everything is ok
     /// - there is fn:reverse however those work on sequences and SPARQL defines to translate to call on sequence of "single node" and there is even an example:
     ///     - fn:reverse(("hello")) returns ("hello").
+    /// - considerations about STRLEN
     fn translate_function(&mut self, func: &Function, parameter_expressions: &Vec<Expression>, binding: &dyn TypedPredicate) -> Result<SolutionExpression, TranslateError> {
         let params = parameter_expressions.iter().map(|e| self.translate_expression(e, binding)).collect::<Result<Vec<_>, _>>()?;
         match func {
@@ -453,9 +589,15 @@ impl QueryTranslator {
     /// - Better error handling in boolean operations, the current implementation using OR, and AND does not handle errors correctly; maybe check all the functions for error handling...
     /// info:
     /// - nemos AND and OR functions handle errors not correctly
-    /// - comparisons not implemented for strings
-    /// - nemo has no unary operators -> implement anyway
+    /// - same term normalizes first
+    /// - nemo has no unary operators -> implement anyway but can not use them because there might be strings
     /// - divide produces always int but is decimal in SPARQL when dividing ints
+    /// - comparisons
+    ///     - comparisons explicitly implemented for strings
+    ///     - inputs not casted for equality but for less, greater and others they are (nemo just converts different types to double)
+    ///     - converting to double seems to be equivalent to the numeric type promotion and subtype substitution rules for less, greater and those operators
+    ///     - dateTime, boolean not supported (boolean can not even be converted to double, but it is converted to int)
+    ///     - special handling of conversion for equality
     fn translate_expression(&mut self, expression: &Expression, binding: &dyn TypedPredicate) -> Result<SolutionExpression, TranslateError> {
         match expression {
             Expression::Variable(v) => self.translate_expression_variable(v, binding),
@@ -487,47 +629,35 @@ impl QueryTranslator {
             Expression::Greater(left, right) => {
                 let left_solution = self.translate_expression(left, binding)?;
                 let right_solution = self.translate_expression(right, binding)?;
-                self.translate_by_cases(
-                    nemo_filter!("", ?l, " > ", ?r, ""),
-                    nemo_filter!("", ?l, " <= ", ?r, ""),
-                    &left_solution, &right_solution, binding
+                self.translate_comparison(
+                    " > ", " <= ", 1, true, &left_solution, &right_solution, binding
                 )
             },
             Expression::GreaterOrEqual(left, right) => {
                 let left_solution = self.translate_expression(left, binding)?;
                 let right_solution = self.translate_expression(right, binding)?;
-                self.translate_by_cases(
-                    nemo_filter!("", ?l, " >= ", ?r, ""),
-                    nemo_filter!("", ?l, " < ", ?r, ""),
-                    &left_solution, &right_solution, binding
+                self.translate_comparison(
+                    " >= ", " < ", -1, false, &left_solution, &right_solution, binding
                 )
             },
             Expression::Less(left, right) => {
                 let left_solution = self.translate_expression(left, binding)?;
                 let right_solution = self.translate_expression(right, binding)?;
-                self.translate_by_cases(
-                    nemo_filter!("", ?l, " < ", ?r, ""),
-                    nemo_filter!("", ?l, " >= ", ?r, ""),
-                    &left_solution, &right_solution, binding
+                self.translate_comparison(
+                    " < ", " >= ", -1, true, &left_solution, &right_solution, binding
                 )
             },
             Expression::LessOrEqual(left, right) => {
                 let left_solution = self.translate_expression(left, binding)?;
                 let right_solution = self.translate_expression(right, binding)?;
-                self.translate_by_cases(
-                    nemo_filter!("", ?l, " <= ", ?r, ""),
-                    nemo_filter!("", ?l, " > ", ?r, ""),
-                    &left_solution, &right_solution, binding
+                self.translate_comparison(
+                    " <= ", " > ", 1, false, &left_solution, &right_solution, binding
                 )
             },
             Expression::Equal(left, right) => {
                 let left_solution = self.translate_expression(left, binding)?;
                 let right_solution = self.translate_expression(right, binding)?;
-                self.translate_by_cases(
-                    nemo_filter!("", ?l, " = ", ?r, ""),
-                    nemo_filter!("", ?l, " != ", ?r, ""),
-                    &left_solution, &right_solution, binding
-                )
+                self.translate_equal(&left_solution, &right_solution, binding)
             },
             Expression::In(inner, list) => {
                 let inner_solution = self.translate_expression(inner, binding)?;
@@ -587,9 +717,11 @@ impl QueryTranslator {
                 let false_solution = self.translate_expression(false_val, binding)?;
                 self.translate_if(&cond_solution, &true_solution, &false_solution, binding)
             }
-            // coalesce
-            Expression::FunctionCall(func, params) => self.translate_function(func, params, binding),
-            _ => Err(ExpressionNotImplemented(expression.clone()))
+            Expression::Coalesce(vals) => {
+                let val_solutions = vals.iter().map(|v| self.translate_expression(v, binding)).collect::<Result<Vec<_>, _>>()?;
+                self.translate_coalesce(val_solutions, binding)
+            }
+            Expression::FunctionCall(func, params) => self.translate_function(func, params, binding)
         }
     }
 
@@ -774,10 +906,20 @@ impl QueryTranslator {
     /// - changed left join to call the filter also on the unbound variables, is this correct?
     /// 	- changed back because filtered values should probably lead to unbound values
     /// - could optimize left join to not do unbound variables if all variables match (but probably mostly they don't)
+    /// - cross join for non overlapping ?
+    /// - handle join like/using normal join
+    ///
+    /// info:
+    /// - did not require negation with existential rules (however existential rules are unreliable)
+    /// . consider all cases: identical variables, overlapping variables, non overlapping variables
     fn translate_left_join(&mut self, left: &Box<GraphPattern>, right: &Box<GraphPattern>, expression: &Option<Expression>) -> Result<SolutionSet, TranslateError> {
         let left_solution = self.translate_pattern(left)?;
         let right_solution = self.translate_pattern(right)?;
+
+        // regular join
         nemo_def!(raw_join(??both, ??left, ??right) :- left_solution(??both, ??left), right_solution(??both, ??right); SolutionSet);
+
+        // filtering
         let filtered_join = match expression {
             Some(Expression::Exists(pattern)) => {
                 let pattern_solution = self.translate_pattern(pattern)?;
@@ -790,10 +932,11 @@ impl QueryTranslator {
             },
             None => raw_join
         };
+
+        // add unbound values
         nemo_def!(left_join(??vars) :- filtered_join(??vars); SolutionSet);
-        add_rule(&left_join, Rule::new(get_vars(&left_join).iter().map(
-            |v| if get_vars(&left_solution).contains(v) { Binding::from(v) } else { Binding::Existential(v.clone()) }
-        ).collect(), vec![to_bound_predicate(&left_solution)], vec![]));
+        let (unbound, head) = self.map_unbound(&left_join, &left_solution);
+        nemo_add!(left_join(head) :- left_solution(??left), ~filtered_join(??left, ??right_only), {&unbound});
 
         Ok(left_join)
     }
@@ -806,14 +949,11 @@ impl QueryTranslator {
     /// info:
     /// - in a simple world without unbound variables this could also just work on compatible bindings
     fn translate_union(&mut self, left: &SolutionSet, right: &SolutionSet) -> Result<SolutionSet, TranslateError> {
-        let unbound = VarPtr::new("unbound");
-        let unbound_pred = self.undefined_val.clone();
         let union = SolutionSet::create("union", nemo_terms![get_vars(left), get_vars(right)].vars());
-        let unbound_other = |other| get_vars(&union).iter().map(|v| if get_vars(other).contains(v) {v.clone()} else {unbound.clone()} ).collect::<Vec<_>>();
-        let left_bindings = unbound_other(left);
-        let right_bindings = unbound_other(right);
-        nemo_add!(union(left_bindings) :- left(??left), unbound_pred(unbound));
-        nemo_add!(union(right_bindings) :- right(??right), unbound_pred(unbound));
+        let (left_unbound, left_head) = self.map_unbound(&union, left);
+        let (right_unbound, right_head) = self.map_unbound(&union, right);
+        nemo_add!(union(left_head) :- left(??left), {&left_unbound});
+        nemo_add!(union(right_head) :- right(??right), {&right_unbound});
         Ok(union)
     }
 

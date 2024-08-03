@@ -401,6 +401,18 @@ impl From<usize> for Binding {
     }
 }
 
+impl From<&i32> for Binding {
+    fn from(value: &i32) -> Self {
+        Binding::Constant(format!("{}", value))
+    }
+}
+
+impl From<i32> for Binding {
+    fn from(value: i32) -> Self {
+        Binding::Constant(format!("{}", value))
+    }
+}
+
 impl From<&bool> for Binding {
     fn from(value: &bool) -> Self {
         Binding::Constant(if *value {TRUE.to_string()} else {FALSE.to_string()})
@@ -996,6 +1008,10 @@ pub fn to_bound_predicate(p: &dyn TypedPredicate) -> BoundPredicate {
     BoundPredicate::new(p.get_predicate(), get_vars(p).iter().map(Binding::from).collect(), false)
 }
 
+pub fn to_negated_bound_predicate(p: &dyn TypedPredicate) -> BoundPredicate {
+    BoundPredicate::new(p.get_predicate(), get_vars(p).iter().map(Binding::from).collect(), true)
+}
+
 pub fn construct_program(p: &dyn TypedPredicate) -> String {
     let mut state = GenState::new();
     let output_rule = p.get_predicate().construct_program(&mut state);
@@ -1338,7 +1354,7 @@ impl ProtoPredicate {
         }
     }
 
-    fn flat_clone(&self) -> Vec<ProtoPredicate> {
+    pub fn flat_clone(&self) -> Vec<ProtoPredicate> {
         match self {
             ProtoPredicate::Explicit(head, body, negated) => vec![
                 ProtoPredicate::Explicit(head.clone(), body.clone(), *negated)
@@ -1392,6 +1408,12 @@ impl<T: TypedPredicate> From<&Vec<T>> for ProtoPredicate {
 impl From<&BoundPredicate> for ProtoPredicate {
     fn from(value: &BoundPredicate) -> Self {
         ProtoPredicate::Explicit(value.predicate.clone(), value.bindings.iter().map(ProtoBinding::from).collect(), value.negated)
+    }
+}
+
+impl From<Vec<ProtoPredicate>> for ProtoPredicate {
+    fn from(value: Vec<ProtoPredicate>) -> Self {
+        ProtoPredicate::Multi(value)
     }
 }
 
