@@ -759,6 +759,14 @@ impl QueryTranslator {
         Ok(BoundPredicate::new(self.input_graph.clone(), vec![subject, predicate, object], false))
     }
 
+    /// info
+    /// - mapping variables is µ, bnodes is sigma and both is called "Pattern Instance Mapping"
+    /// - note that bnodes are projected away and can never match anything in the future
+    ///     - this is standard compliant because the algebra returns just solution mappings µ
+    ///     - however e.g. in rdflib bnodes can match across joins: `list(g.query("select ?c where {{_:1 a ?c}{_:1 a ?d . BIND(?d as ?c)}}"))`
+    ///         - note that without BIND the two parts would be a single graph pattern and the bnodes could indeed interact
+    ///             - I did not find this in the standard, might be spargebra specific optimization
+    ///     - spargebra produces a parsing error in this case
     fn translate_bgp(&mut self, patterns: &Vec<TriplePattern>) -> Result<SolutionSet, TranslateError> {
         let mut variables = Vec::new();
         let mut body_parts = nemo_atoms![];
@@ -769,8 +777,6 @@ impl QueryTranslator {
         Ok(bgp)
     }
 
-    /// notes
-    /// - check if same bnodes in separate bgp count as same variable -> not in current implementation
     fn translate_bgp_multi(&mut self, patterns: &Vec<TriplePattern>) -> Result<SolutionMultiSet, TranslateError> {
         let mut variables = Vec::new();
         let mut bnode_vars = Vec::new();
@@ -795,8 +801,16 @@ impl QueryTranslator {
         }
     }
 
-    /// notes
+    /// info
     /// - path iteration could probably restrict inner path more (only compute inner path for actually needed)
+    ///     - could add optional restricting predicate for start and end of each path function
+    ///     - note that two hop (quadratic size) is not computed for inner path
+    /// - works similar to function ALP in standard
+    ///     - the binding that is not a constant forms the visited term set in ALP
+    ///         - reverse iterate is actually part of ZeroOrMorePath definition not ALP
+    ///         - the start node is not part of the set
+    ///     - nemo recursion replaces recursion in function
+    ///     - visited check by nemos set semantic
     fn translate_one_or_more_path(&mut self, start: Binding, path: &SolutionSet, end: Binding) -> SolutionSet {
         let reverse_iterate = Self::is_constant(&end) && !Self::is_constant(&start);
         let mid = nemo_var!(mid);
@@ -814,14 +828,14 @@ impl QueryTranslator {
         }
     }
 
-    /// notes
-    /// - check if spargebra normalizes literals, there is a string equality check in zero_path_extend
-    /// - comparison of constants based on literal values in zero_path_extend
-    /// 	- now done using spargebra Term comperision
+    /// info:
+    /// - "Node set of a graph" only includes subject and object
+    /// - check if start and end are different constants is done using spargebra (in)equality operator for terms which is probably not very sophisticated
+    ///     - not a problem because standard does not allow literal in subject position
+    /// - this literally changes the path, not relevant but example of needing to be carefull when to check for UNDEF pos in precicate
     fn zero_path_extend(&mut self, start: Binding, path: SolutionSet, end: Binding) -> SolutionSet {
         // start and end are different constants -> there is no zero path
         if Self::is_constant(&start) && Self::is_constant(&end) && &start != &end { return path }
-        //if let Binding::Constant(c1) = start { if let Binding::Constant(c2) = end { if c1 != c2 { return path } } }
 
         let start_constant = if Self::is_constant(&start) {Some(start)} else {None};
         let end_constant = if Self::is_constant(&end) {Some(end)} else {None};
@@ -830,15 +844,14 @@ impl QueryTranslator {
         if let Some(c) = constant {
             // one term (the other one is a variable) or two terms (start and end are the same)
             nemo_add!(path(c, c));
-            path
         }
         else {
             // no constants
             let input_graph = self.triple_set();
             nemo_add!(path(?s, ?s) :- input_graph(?s, ?p, ?o));
             nemo_add!(path(?o, ?o) :- input_graph(?s, ?p, ?o));
-            path
         }
+        path
     }
 
     /// notes
@@ -857,6 +870,8 @@ impl QueryTranslator {
     /// notes
     /// - check bnodes in path expression start or end
     /// - zero length path between node not in data is treated as not existing I think is this correct?
+    /// info:
+    /// - returned predicate has always two variables, in the standard there can be a solution mapping with one variable this is represented by binding one variable always to a constant
     fn translate_path(&mut self, start: Binding, path: &PropertyPathExpression, end: Binding) -> Result<SolutionSet, TranslateError> {
         match path {
             PropertyPathExpression::NamedNode(property) => {
@@ -989,6 +1004,8 @@ impl QueryTranslator {
         values
     }
 
+    /// notes
+    /// - this is wrong for multi sets, you might have to combine things that become the same after projection
     fn translate_project_g<T: TypedPredicate>(&mut self, inner: &T, variables: &Vec<Variable>) -> Result<T, TranslateError> {
         nemo_def!(projection(@?count: ?c, @?index: ?i; nemo_terms!(variables => self.translate_var_func())) :- inner(@?count: ?x, @?index: ?i; ??all_vars); T);
         Ok(projection)

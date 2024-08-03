@@ -18,23 +18,13 @@ fn _test_parsing() {
     let query_str = "
         prefix s: <https://xxx#>
 
-        SELECT DISTINCT (?s + 1 AS ?x)
+        SELECT ?c
         WHERE {
-            ?s <https://p> s:a .
-            ?s ?p ?o .
-            ?s s:p* | a s:o ; s:p s:o2 .
-            FILTER NOT EXISTS {
-                { ?s ?p3 ?p4 .}
-                UNION
-                { ?s ?p3 ?p5 . }
-            }
-            FILTER(?s > 8)
+            _:1 !(^s:a|s:b) ?c .
         }
-        ORDER BY ?s
     ";
     let query = Query::parse(query_str, None).unwrap();
 
-    println!("Hello, world!");
     println!("{}", query.to_string());
     println!("{}", query.to_sse());
 
