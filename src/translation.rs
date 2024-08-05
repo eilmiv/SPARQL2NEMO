@@ -355,6 +355,7 @@ impl QueryTranslator {
         let unbound = self.undefined_val.clone();
         nemo_def!(bound(nemo_var; @result: true) :- binding(??vars), ~unbound(nemo_var); SolutionExpression);
         if !has_prop_for_var(binding, IS_DEFINED, &nemo_var) {
+            // it is important to add this rule only if nemo_var is not known to be defined because it marks it as possibly undefined
             nemo_add!(bound(nemo_var; @result: false) :- unbound(nemo_var), binding(??vars));
         }
         Ok(bound)
@@ -925,6 +926,13 @@ impl QueryTranslator {
         }
     }
 
+    /// info:
+    /// - different join algorithms
+    fn translate_join(&mut self, left: &SolutionSet, right: &SolutionSet) -> Result<SolutionSet, TranslateError> {
+        nemo_def!(join(??both, ??left, ??right) :- left(??both, ??left), right(??both, ??right); SolutionSet);
+        Ok(join)
+    }
+
     /// notes
     /// - changed left join to call the filter also on the unbound variables, is this correct?
     /// 	- changed back because filtered values should probably lead to unbound values
@@ -1171,8 +1179,7 @@ impl QueryTranslator {
             GraphPattern::Join{left, right} => {
                 let left_solution = self.translate_pattern(left)?;
                 let right_solution = self.translate_pattern(right)?;
-                nemo_def!(join(??both, ??left, ??right) :- left_solution(??both, ??left), right_solution(??both, ??right); SolutionSet);
-                Ok(join)
+                self.translate_join(&left_solution, &right_solution)
             }
             GraphPattern::LeftJoin {left, right, expression} => {
                 self.translate_left_join(left, right, expression)
