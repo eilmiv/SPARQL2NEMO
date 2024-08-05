@@ -584,9 +584,6 @@ impl QueryTranslator {
         }
     }
 
-    /// notes
-    /// - implement COALESCE -> requires negation or aggregation if errors are represented by missing facts
-    /// - Better error handling in boolean operations, the current implementation using OR, and AND does not handle errors correctly; maybe check all the functions for error handling...
     /// info:
     /// - nemos AND and OR functions handle errors not correctly
     /// - same term normalizes first
@@ -830,19 +827,27 @@ impl QueryTranslator {
 
     /// info:
     /// - "Node set of a graph" only includes subject and object
-    /// - check if start and end are different constants is done using spargebra (in)equality operator for terms which is probably not very sophisticated
-    ///     - not a problem because standard does not allow literal in subject position
+    /// - check if start and end are different constants is NOT done using spargebra (in)equality operator for terms to ensure consistency when path gets simplified to bgp
+    ///     - a problem even tho standard does not allow literal in subject position.
+    ///     - what about `select distinct (1 as ?out) where {1 (^<https://example.com/backward> / <https://example.com/forward>)? 1}`
+    ///         - error in virtuoso (literal in subject position of transitive triple pattern)
+    ///         - 1 and 1.0 considered different in blazegraph and rdflib, however "01"^^xsd:integer and "1"^^xsd:integer are only different in rdflib
     /// - this literally changes the path, not relevant but example of needing to be carefull when to check for UNDEF pos in precicate
     fn zero_path_extend(&mut self, start: Binding, path: SolutionSet, end: Binding) -> SolutionSet {
         // start and end are different constants -> there is no zero path
-        if Self::is_constant(&start) && Self::is_constant(&end) && &start != &end { return path }
+        if Self::is_constant(&start) && Self::is_constant(&end) {
+            nemo_def!(start_c(start));
+            nemo_def!(end_c(end));
+            nemo_add!(path(?c, ?c) :- start_c(?c), end_c(?c));
+            return path
+        }
 
         let start_constant = if Self::is_constant(&start) {Some(start)} else {None};
         let end_constant = if Self::is_constant(&end) {Some(end)} else {None};
         let constant = start_constant.or(end_constant);
 
         if let Some(c) = constant {
-            // one term (the other one is a variable) or two terms (start and end are the same)
+            // one term, the other one is a variable; two terms already handled above
             nemo_add!(path(c, c));
         }
         else {
@@ -854,9 +859,8 @@ impl QueryTranslator {
         path
     }
 
-    /// notes
-    /// - check negated property set. current implementation only matches forward properties.
-    /// 	- seems kind of correct: https://www.w3.org/TR/sparql11-query/#eval_negatedPropertySet
+    /// info
+    /// - only matches forward properties is correct: https://www.w3.org/TR/sparql11-query/#eval_negatedPropertySet
     fn translate_negated_property_set(&mut self, start: Binding, properties: &Vec<NamedNode>, end: Binding) -> SolutionSet {
         let mut filters = nemo_atoms!();
         for p in properties {
@@ -867,10 +871,14 @@ impl QueryTranslator {
         negated_property_set
     }
 
-    /// notes
-    /// - check bnodes in path expression start or end
-    /// - zero length path between node not in data is treated as not existing I think is this correct?
-    /// info:
+    /// info
+    /// - bnodes in path expression start or end
+    ///     - `select distinct (1 as ?out) where {_:1 (^<https://example.com/backward> / <https://example.com/forward>)? _:1}`
+    ///     - rdflib/blazegraph has no result
+    ///     - virtuoso has error: bnode not allowed in subject of transitive path (like literal)
+    ///     - works for me but parsing error when bnode occurs also in normal bgp
+    ///         - except for anonomous bnodes: s:a s:b [ s:x* s:y ] !
+    /// - zero length path between node not in data is treated as existing I this is correct, easyer to see for ZeroOrOne than for ZeroOrMore path
     /// - returned predicate has always two variables, in the standard there can be a solution mapping with one variable this is represented by binding one variable always to a constant
     fn translate_path(&mut self, start: Binding, path: &PropertyPathExpression, end: Binding) -> Result<SolutionSet, TranslateError> {
         match path {
@@ -1086,6 +1094,7 @@ impl QueryTranslator {
     /// notes
     /// - Undefined sorted first
     /// - sort assumes total order
+    /// - implement fast hacker sort for benchmarking
     fn translate_sort(&mut self, inner: &SolutionSequence, order_expression: &OrderExpression) -> Result<SolutionSequence, TranslateError> {
         let val = nemo_var!(sort_val);
         let other_val = nemo_var!(other_sort_val);
@@ -1121,6 +1130,7 @@ impl QueryTranslator {
 
     /// notes
     /// - get_sequence uses hacky bit (could be replaced by sort in the future)
+    /// - implement sorting based variant
     fn get_sequence(&mut self, inner: &SolutionSet) -> SolutionSequence {
         nemo_def!(sequence_proto(??vars; @result: nemo_var!(!bnode_for_id)) :- inner(??vars); SolutionExpression);
         let bnode_var = nemo_var!(bnode_var);

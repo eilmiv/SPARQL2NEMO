@@ -126,7 +126,8 @@ fn nemo_not_working() -> Result<(), Error>{
         "out(DATATYPE(?a)) :- in(?a), DOUBLE(?a) >= DOUBLE(\"false\"^^xsd:boolean) .\n@output out .".to_string(),
         "
             @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
-            in(\"true\"^^xsd:boolean) .
+            in_1(1) .
+            in_2(1.0) .
         ",
         ""
     )
@@ -434,7 +435,7 @@ fn path_constants() -> Result<(), Error> {
             input_graph(22, ex:p, 222) .
          ",
         "42"
-    )?;  // is this standard behaviour? 5 is neither subject nor object so is there really a zero length path between it?
+    )?;  // is this standard behaviour? 5 is neither subject nor object so is there really a zero length path between it? I think this is correct
     assert_sparql(
         "
             prefix ex: <https://example.com/>

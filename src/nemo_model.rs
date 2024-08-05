@@ -1878,6 +1878,18 @@ macro_rules! nemo_declare {
 }
 
 macro_rules! nemo_def {
+    ($name:ident($($arg:expr),*)) => {
+        let bindings: Vec<String> = vec![$(crate::nemo_model::Binding::from(&$arg)),*].iter().map(|binding|
+            match binding {
+                crate::nemo_model::Binding::Constant(c) => c.clone(),
+                _ => panic!("Fact bindings should be constants (got {:?})", binding),
+            }
+        ).collect();
+        let $name = crate::nemo_model::Basic::create(stringify!($name), bindings.iter().map(|_b| VarPtr::new("v")).collect());
+        crate::nemo_model::add_fact(&$name,
+            crate::nemo_model::Fact::new(bindings)
+        )
+    };
     ( // pattern duplicated for nemo_add but without type
         $head_name:ident(
             $(

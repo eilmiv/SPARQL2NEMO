@@ -20,7 +20,7 @@ fn _test_parsing() {
 
         SELECT ?c
         WHERE {
-            _:1 !(^s:a|s:b) ?c .
+            s:a s:b [ s:x* s:y ] .
         }
     ";
     let query = Query::parse(query_str, None).unwrap();
@@ -146,5 +146,5 @@ fn _test_model(){
 
 
 fn main() {
-    _test_translation();
+    _test_parsing();
 }
