@@ -131,6 +131,7 @@ impl<T> From<&Vec<T>> for TermSet where Binding: for<'a> From<&'a T> {
 macro_rules! nemo_terms {
     ($($part:expr $(=> $func:expr)? ),*) => {
         {
+            #[allow(unused_mut)]
             let mut term_set = crate::nemo_model::TermSet::new();
             $(
                 #[allow(unused_variables)]
@@ -1237,7 +1238,7 @@ impl ProtoBinding {
         }
     }
 
-    fn resolve(&self, set_variables: &HashMap<String, Vec<VarPtr>>, rename_set_variables: Option<&HashMap<String, Vec<VarPtr>>>) -> Vec<ProtoBinding> {
+    fn resolve(&self, set_variables: Option<&HashMap<String, Vec<VarPtr>>>, rename_set_variables: Option<&HashMap<String, Vec<VarPtr>>>) -> Vec<ProtoBinding> {
         match self {
             ProtoBinding::Binding(_) | ProtoBinding::NamedConnection(_)  => vec![self.clone()],
             ProtoBinding::Aggregate(name, sub_bindings) => {
@@ -1263,7 +1264,10 @@ impl ProtoBinding {
                 }
             },
             ProtoBinding::VariableSet(s) => {
-                let vars = set_variables.get(s).expect(&format!("Var set {s} not bound"));
+                let vars = set_variables
+                    .expect("Unexpected VariableSet.")  // This would probably be an error in binding_parts or a function that forgot to use it
+                    .get(s)
+                    .expect(&format!("Var set {s} not bound"));
                 let mut resolved_bindings = Vec::new();
                 for v in hash_dedup(vars) {
                      resolved_bindings.push(ProtoBinding::Binding(Binding::Variable(v)))
@@ -1303,6 +1307,13 @@ impl From<&TermSet> for ProtoBinding {
 impl From<&Vec<VarPtr>> for ProtoBinding {
     fn from(value: &Vec<VarPtr>) -> Self {
         ProtoBinding::BindingList(value.iter().map(|v| Binding::from(v)).collect())
+    }
+}
+
+/// allows duplication of a binding compared to a [TermSet]
+impl From<&Vec<Binding>> for ProtoBinding {
+    fn from(value: &Vec<Binding>) -> Self {
+        ProtoBinding::BindingList(value.iter().map(|v| v.clone()).collect())
     }
 }
 
@@ -1607,7 +1618,7 @@ impl RuleBuilder {
 
         // compute which predicate contains which variables and var set bindings
         // handle head
-        if let Some(target) = &self.target_predicate{
+        if let Some(target) = &self.target_predicate {
             let target_vars = target.vars();
             let (_start, middle_vars, _end) = binding_parts(&self.head, &target_vars);
             for var in middle_vars {
@@ -1683,7 +1694,7 @@ impl RuleBuilder {
                     let predicate_vars = predicate.vars();
                     let (start, middle_vars, end) = binding_parts(bindings, &predicate_vars);
                     let mut new_bindings: Vec<ProtoBinding> = Vec::new();
-                    new_bindings.extend(start.iter().cloned());
+                    new_bindings.extend(start.iter().flat_map(|b| b.resolve(None, None)));
                     for var in middle_vars {
                         let predicates = *var_predicates.get(var).expect("predicates for var not computed.");
                         if let Some(var_set) = set_index.get(&predicates) {
@@ -1730,7 +1741,7 @@ impl RuleBuilder {
                     for var_set in variable_sets(bindings) {
                         set_variables.entry(var_set).or_insert_with(Vec::new);
                     }
-                    new_bindings.extend(end.iter().cloned());
+                    new_bindings.extend(end.iter().flat_map(|b| b.resolve(None, None)));
                     new_body.push(ProtoPredicate::Explicit(predicate.clone(), new_bindings, *negated))
                 },
                 ProtoPredicate::Special(prefix, bindings) => {
@@ -1797,7 +1808,7 @@ impl RuleBuilder {
             let predicate_vars = target.vars();
             let (start, middle_vars, end) = binding_parts(&self.head, &predicate_vars);
             new_head.extend(
-                start.iter().cloned().map(|proto_binding| proto_binding.resolve(&set_variables, None)).flatten()
+                start.iter().cloned().map(|proto_binding| proto_binding.resolve(Some(&set_variables), None)).flatten()
             );
             for var in middle_vars {
                 let predicates = *var_predicates.get(var).expect("predicates for var in head not computed.");
@@ -1809,11 +1820,11 @@ impl RuleBuilder {
                 }
             }
             new_head.extend(
-                end.iter().cloned().map(|proto_binding| proto_binding.resolve(&set_variables, None)).flatten()
+                end.iter().cloned().map(|proto_binding| proto_binding.resolve(Some(&set_variables), None)).flatten()
             );
         } else {
             new_head.extend(
-                self.head.iter().map(|binding| binding.resolve(&set_variables, Some(&rename_set_variables))).flatten()
+                self.head.iter().map(|binding| binding.resolve(Some(&set_variables), Some(&rename_set_variables))).flatten()
             );
         }
 
@@ -1826,7 +1837,7 @@ impl RuleBuilder {
         let mut predicates: Vec<BoundPredicate> = Vec::new();
         let mut filters: Vec<SpecialPredicate> = Vec::new();
 
-        for proto_predicate in proto_body{
+        for proto_predicate in proto_body {
             proto_predicate.compile(&mut name_lookup, &mut predicates, &mut filters)
         }
 

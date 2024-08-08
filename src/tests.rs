@@ -1464,6 +1464,31 @@ fn join() -> Result<(), Error> {
 }
 
 
+
+#[test]
+fn join_undefined() -> Result<(), Error> {
+    assert_sparql(
+        "
+            prefix ex: <https://example.com/>
+
+            SELECT DISTINCT ?a ?b ?x ?y
+            WHERE
+            {
+                VALUES (?a ?b ?x) {(1 2 UNDEF) (UNDEF 3 4)}
+                VALUES (?a ?b ?y) {(1 2 3) (1 3 5) (2 3 6) (UNDEF 3 7)}
+            }
+        ",
+        "",
+        "
+            1, 2, UNDEF, 3
+            1, 3, 4, 5
+            2, 3, 4, 6
+            UNDEF, 3, 4, 7
+        "
+    )
+}
+
+
 #[test]
 fn left_join() -> Result<(), Error> {
     assert_sparql(
@@ -1709,7 +1734,6 @@ fn minus() -> Result<(), Error> {
 
 #[test]
 fn values() -> Result<(), Error> {
-    // this is not correct sparql behaviour yet
     // note: values tuple with missing value in tuple is parsing error
     assert_sparql(
         "
@@ -1727,8 +1751,8 @@ fn values() -> Result<(), Error> {
             }
         ",
         "",
-        "<https://example.com/a>, 1, 2; <https://example.com/b>, _:0, 3; <https://example.com/c>, 5, _:1"
-    )  // standard compliant behaviour is to also include a line for (a UNDEF UNDEF) but this gets omitted because of how existential rules work in nemo
+        "<https://example.com/a>, 1, 2; <https://example.com/b>, UNDEF, 3; <https://example.com/c>, 5, UNDEF; <https://example.com/a>, UNDEF, UNDEF"
+    )
 }
 
 #[test]

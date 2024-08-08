@@ -5,7 +5,7 @@ use spargebra::Query;
 use spargebra::term::{BlankNode, GroundTerm, Literal, NamedNode, NamedNodePattern, TermPattern, TriplePattern, Variable};
 use crate::error::TranslateError;
 use crate::error::TranslateError::{AggregationNotImplemented, MultiPatternNotImplemented, PatternNotImplemented, SequencePatternNotImplemented};
-use crate::nemo_model::{add_rule, Binding, BoundPredicate, Call, construct_program, get_vars, has_prop_for_var, hash_dedup, nemo_add, nemo_atoms, nemo_call, nemo_condition, nemo_def, nemo_filter, nemo_iri, nemo_predicate_type, nemo_terms, nemo_var, PredicatePtr, ProtoPredicate, Rule, to_bound_predicate, to_negated_bound_predicate, TypedPredicate, VarPtr};
+use crate::nemo_model::{add_rule, Binding, BoundPredicate, Call, construct_program, get_vars, has_prop_for_var, hash_dedup, nemo_add, nemo_atoms, nemo_call, nemo_condition, nemo_def, nemo_filter, nemo_iri, nemo_predicate_type, nemo_terms, nemo_var, PredicatePtr, ProtoPredicate, Rule, TermSet, to_bound_predicate, to_negated_bound_predicate, TypedPredicate, VarPtr};
 
 nemo_predicate_type!(SolutionSet = ...);
 nemo_predicate_type!(SolutionMultiSet = count ...);
@@ -108,6 +108,7 @@ impl QueryTranslator {
         move |var: &Variable| self.sparql_vars.get(var)
     }
 
+    /// maps all variables of target that are not in source to unbound
     fn map_unbound(&self, target: &dyn TypedPredicate, source: &dyn TypedPredicate) -> (BoundPredicate, Vec<VarPtr>) {
         let unbound = VarPtr::new("unbound");
         let unbound_predicate = BoundPredicate::new(self.undefined_val.get_predicate(), vec![Binding::from(&unbound)], false);
@@ -451,6 +452,7 @@ impl QueryTranslator {
     /// info:
     /// - Note negative years exist -> pass the reversed date string
     /// - seconds should be decimal not double
+    /// - possibly handling of ill formed literals
     fn date_function(&mut self, expressions: &Vec<SolutionExpression>, func: &Function, parameter_expressions: &Vec<Expression>) -> Result<SolutionExpression, TranslateError> {
         let (is_time, offset) = match func {
             Function::Year => (false, 2),
@@ -926,10 +928,32 @@ impl QueryTranslator {
         }
     }
 
+    /// binds unbound values in with_undef to all possible values in bindings_from
+    fn bind_unbound(&mut self, with_undef: &SolutionSet, bindings_from: &SolutionSet) -> (ProtoPredicate, TermSet) {
+        let mut map_atoms = nemo_atoms![];
+        let mut new_binding = nemo_terms![];
+        for v in get_vars(with_undef) {
+            if get_vars(bindings_from).contains(&v) && !has_prop_for_var(with_undef, IS_DEFINED, &v) {
+                let maybe_undef = nemo_var!(maybe_undef);
+                let undef = self.undefined_val.clone();
+                nemo_def!(map(v, maybe_undef) :- {bindings_from}, undef(maybe_undef); SolutionSet);
+                nemo_add!(map(v, v) :- {with_undef});
+                map_atoms = nemo_atoms![map_atoms, &map];
+                new_binding = nemo_terms![new_binding, maybe_undef];
+            } else {
+                new_binding = nemo_terms![new_binding, v]
+            }
+        }
+        (map_atoms, new_binding)
+    }
+
     /// info:
-    /// - different join algorithms
+    /// - different join algorithms possible (maybe prove equivalence?)
     fn translate_join(&mut self, left: &SolutionSet, right: &SolutionSet) -> Result<SolutionSet, TranslateError> {
-        nemo_def!(join(??both, ??left, ??right) :- left(??both, ??left), right(??both, ??right); SolutionSet);
+        let result_terms = nemo_terms![get_vars(left), get_vars(right)];
+        let (left_map_atoms, left_bindings) = self.bind_unbound(left, right);
+        let (right_map_atoms, right_bindings) = self.bind_unbound(right, left);
+        nemo_def!(join(result_terms) :- {left_map_atoms}, left(left_bindings), {right_map_atoms}, right(right_bindings); SolutionSet);
         Ok(join)
     }
 
@@ -1001,21 +1025,26 @@ impl QueryTranslator {
         Ok(extend)
     }
 
-    fn translate_ground_term(&mut self, term: &Option<GroundTerm>) -> Binding {
+    fn translate_ground_term(&mut self, term: &Option<GroundTerm>, undef_var: &Binding) -> Binding {
         #[allow(unreachable_patterns)]
         match term {
-            None => nemo_var!(!UNDEF),
+            None => undef_var.clone(),
             Some(GroundTerm::Literal(l)) => Binding::from(l),
             Some(GroundTerm::NamedNode(n)) => Binding::from(n),
             _ => unreachable!("rdf* feature is not enabled")
         }
     }
 
+    /// info
+    /// - used empty rule because exitentials only work with rules
+    /// - existentials could loose some tuples that also exist with all UNDEFs bound
     fn translate_values(&mut self, variables: &Vec<Variable>, bindings: &Vec<Vec<Option<GroundTerm>>>) -> SolutionSet {
         let values = SolutionSet::create("values", nemo_terms!(variables => self.translate_var_func()).vars());
+        let undef = nemo_var!(undef);
+        let undef_pred = self.undefined_val.clone();
         for binding in bindings {
-            let terms: Vec<Binding> = binding.iter().map(|b| self.translate_ground_term(b)).collect();
-            nemo_add!(values(nemo_terms!(terms)) :- {nemo_atoms![]}); // existentials only work with rules
+            let terms: Vec<Binding> = binding.iter().map(|b| self.translate_ground_term(b, &undef)).collect();
+            nemo_add!(values(terms) :- undef_pred(undef));
         }
         values
     }
