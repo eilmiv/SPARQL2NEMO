@@ -628,20 +628,18 @@ impl Rule {
         result
     }
 
-    fn directly_influences(&self, pos: usize) -> HashSet<(PredicatePtr, usize)> {
+    fn property_at_impl(&self, prop: u32, pos: usize, visited: &mut HashSet<(PredicatePtr, usize)>) -> bool {
         let binding = self.bindings.get(pos).expect(&format!("pos {pos} out of range; arity is {}", self.bindings.len()));
-        match binding {
-            Binding::Variable(_v) => {
-                let mut result = HashSet::new();
-                for bound_pred in &self.body {
-                    if bound_pred.negated { continue };
-                    for pos in bound_pred.bindings.iter().enumerate().filter(|(_i, b)| *b == binding).map(|(i, _b)| i) {
-                        result.insert((bound_pred.predicate.clone(), pos));
-                    }
+        if let Binding::Variable(_v) = binding {
+            for bound_pred in &self.body {
+                if bound_pred.negated { continue };
+                for p in bound_pred.bindings.iter().enumerate().filter(|(_i, b)| *b == binding).map(|(i, _b)| i) {
+                    if bound_pred.predicate.property_at_impl(prop, p, visited) { return true }
                 }
-                result
-            },
-            _ => HashSet::new()
+            }
+            false
+        } else {
+            true
         }
     }
 }
@@ -890,30 +888,8 @@ impl PredicatePtr {
         p.var_at(pos)
     }
 
-    fn directly_influences_pos(&self, pos: usize) -> HashSet<(PredicatePtr, usize)> {
-        let p = self.ptr.borrow();
-        p.rules.iter().flat_map(|r| r.directly_influences(pos)).collect()
-    }
-
-    pub fn influences_pos(&self, pos: usize) -> HashSet<(PredicatePtr, usize)> {
-        let mut done: HashSet<(PredicatePtr, usize)> = HashSet::new();
-        let mut doing: Vec<(PredicatePtr, usize)> = Vec::new();
-        doing.push((self.clone(), pos));
-
-        while let Some((pred, p)) = doing.pop() {
-            for influencer in pred.directly_influences_pos(p) {
-                if !done.contains(&influencer) && !doing.contains(&influencer) {
-                    doing.push(influencer);
-                }
-            }
-            done.insert((pred, p));
-        }
-
-        done
-    }
-
     /// This is based on [Predicate::property_at]
-    /// Additional properties are recursively collected from all [influencing positions](PredicatePtr::influences_pos).
+    /// Additional properties are recursively collected from all rules.
     /// Note that only non-negated [explicit bindings](BoundPredicate) of [variables](Binding::Variable) are used to collect properties.
     /// The semantic of a property is that all bindings to a position must have the property.
     ///
@@ -921,18 +897,24 @@ impl PredicatePtr {
     ///     Suppose `is_even` property is defined as flag `1 << 3`.
     ///     The semantic would be that all bindings to a position must be even.
     ///     `a.property_at(is_even, 0)` is `true` by default.
-    ///     A rule `a(?x) :- b(?x) .` would make it false if `b.property_at(is_even, 0)` is known to be false no matter other rules.
+    ///     A rule `a(?x) :- b(?x), c(?x) .` would make it false if `b.property_at(is_even, 0)` and `c.property_at(is_even, 0)` is known to be false no matter other rules.
     ///     Explicitly [unsetting](PredicatePtr::unset_property) would also make it `false`.
     pub fn property_at(&self, property: u32, pos: usize) -> bool {
+        let mut visited: HashSet<(PredicatePtr, usize)> = HashSet::new();
+        self.property_at_impl(property, pos, &mut visited)
+    }
+
+    pub fn property_at_impl(&self, property: u32, pos: usize, visited: &mut HashSet<(PredicatePtr, usize)>) -> bool {
         let p = self.ptr.borrow();
         if !p.property_at(property, pos) { return false }
-        for (dependency, dependency_pos) in self.influences_pos(pos) {
-            let p = dependency.ptr.borrow();
-            if !p.property_at(property, dependency_pos) {
-                return false;
+        if visited.contains(&(self.clone(), pos)) { return true }
+        visited.insert((self.clone(), pos));
+        for rule in p.rules.iter() {
+            if !rule.property_at_impl(property, pos, visited) {
+                return false
             }
         }
-        return true;
+        true
     }
 
     pub fn unset_property(&self, property: u32, pos: usize) {
@@ -995,14 +977,21 @@ pub fn get_vars(p: &dyn TypedPredicate) -> Vec<VarPtr>{
 
 pub fn has_prop(pred: &dyn TypedPredicate, prop: u32, pos: usize) -> bool { pred.get_predicate().property_at(prop, pos) }
 
+
+/// debatable if it sould be disjunction instead of conjunction...
+/// rules definitely have disjunction
 pub fn has_prop_for_var(pred: &dyn TypedPredicate, prop: u32, var: &VarPtr) -> bool {
-    let var_poses: Vec<_> = get_vars(pred).iter().enumerate().filter(|(_i, v)| *v == var).map(|(i, _v)| i).collect();
+    let var_poses: Vec<_> = var_posses(&get_vars(pred), var);
     for p in var_poses {
         if !has_prop(pred, prop, p){
             return false;
         }
     }
     return true;
+}
+
+pub fn var_posses(vars: &Vec<VarPtr>, var: &VarPtr) -> Vec<usize> {
+    vars.iter().enumerate().filter(|(_i, v)| *v == var).map(|(i, _v)| i).collect()
 }
 
 pub fn to_bound_predicate(p: &dyn TypedPredicate) -> BoundPredicate {

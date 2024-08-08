@@ -5,7 +5,7 @@ use spargebra::Query;
 use spargebra::term::{BlankNode, GroundTerm, Literal, NamedNode, NamedNodePattern, TermPattern, TriplePattern, Variable};
 use crate::error::TranslateError;
 use crate::error::TranslateError::{AggregationNotImplemented, MultiPatternNotImplemented, PatternNotImplemented, SequencePatternNotImplemented};
-use crate::nemo_model::{add_rule, Binding, BoundPredicate, Call, construct_program, get_vars, has_prop_for_var, hash_dedup, nemo_add, nemo_atoms, nemo_call, nemo_condition, nemo_def, nemo_filter, nemo_iri, nemo_predicate_type, nemo_terms, nemo_var, PredicatePtr, ProtoPredicate, Rule, TermSet, to_bound_predicate, to_negated_bound_predicate, TypedPredicate, VarPtr};
+use crate::nemo_model::{add_rule, Binding, BoundPredicate, Call, construct_program, get_vars, has_prop_for_var, hash_dedup, nemo_add, nemo_atoms, nemo_call, nemo_condition, nemo_def, nemo_filter, nemo_iri, nemo_predicate_type, nemo_terms, nemo_var, PredicatePtr, ProtoPredicate, Rule, to_bound_predicate, to_negated_bound_predicate, TypedPredicate, var_posses, VarPtr};
 
 nemo_predicate_type!(SolutionSet = ...);
 nemo_predicate_type!(SolutionMultiSet = count ...);
@@ -929,31 +929,64 @@ impl QueryTranslator {
     }
 
     /// binds unbound values in with_undef to all possible values in bindings_from
-    fn bind_unbound(&mut self, with_undef: &SolutionSet, bindings_from: &SolutionSet) -> (ProtoPredicate, TermSet) {
-        let mut map_atoms = nemo_atoms![];
-        let mut new_binding = nemo_terms![];
-        for v in get_vars(with_undef) {
-            if get_vars(bindings_from).contains(&v) && !has_prop_for_var(with_undef, IS_DEFINED, &v) {
-                let maybe_undef = nemo_var!(maybe_undef);
-                let undef = self.undefined_val.clone();
-                nemo_def!(map(v, maybe_undef) :- {bindings_from}, undef(maybe_undef); SolutionSet);
-                nemo_add!(map(v, v) :- {with_undef});
-                map_atoms = nemo_atoms![map_atoms, &map];
-                new_binding = nemo_terms![new_binding, maybe_undef];
-            } else {
-                new_binding = nemo_terms![new_binding, v]
-            }
+    /// info:
+    /// - unbound, unbound, unbound is automatically infered by first case
+    /// - if only one of the sides is unbound the firs position of the result is marked as always defined automatically
+    fn unbound_combinations(&mut self, var: VarPtr, left: &SolutionSet, right: &SolutionSet, left_bindings_update: &mut Vec<VarPtr>, right_bindings_update: &mut Vec<VarPtr>) -> BoundPredicate {
+        let unbound_val = self.undefined_val.clone();
+
+        // initial join on all values that are always bound + var
+        let rename_var_in = |rename_var: VarPtr, pred: &SolutionSet| -> VarPtr {
+            // var and variables that are never undefined will still have the same name in left and right after renaming
+            if rename_var == var { return rename_var }
+            if has_prop_for_var(pred, IS_DEFINED, &rename_var) { return rename_var }
+            return rename_var.distinct_new()
+        };
+        let left_bindings: Vec<_> = get_vars(left).iter().map(|v| rename_var_in(v.clone(), left)).collect();
+        let right_bindings: Vec<_> = get_vars(right).iter().map(|v| rename_var_in(v.clone(), right)).collect();
+        nemo_def!(map(var, var, var) :- left(left_bindings), right(right_bindings); SolutionSet);
+
+        // left may be undefined
+        if !has_prop_for_var(left, IS_DEFINED, &var) {
+            nemo_add!(map(var, ?unbound, var) :- {right}, unbound_val(?unbound));
         }
-        (map_atoms, new_binding)
+
+        // right may be undefined
+        if !has_prop_for_var(right, IS_DEFINED, &var) {
+            nemo_add!(map(var, var, ?unbound) :- {left}, unbound_val(?unbound));
+        }
+
+        // generate new helper variables
+        let left = VarPtr::new("left");
+        let right = VarPtr::new("right");
+        let update_pos_left = var_posses(left_bindings_update, &var);
+        let update_pos_right = var_posses(right_bindings_update, &var);
+        for i in update_pos_left {
+            left_bindings_update[i] = left.clone();
+        }
+        for i in update_pos_right {
+            right_bindings_update[i] = right.clone();
+        }
+        BoundPredicate::new(
+            map.get_predicate(),
+            vec![Binding::Variable(var), Binding::Variable(left), Binding::Variable(right)],
+            false
+        )
     }
 
     /// info:
     /// - different join algorithms possible (maybe prove equivalence?)
     fn translate_join(&mut self, left: &SolutionSet, right: &SolutionSet) -> Result<SolutionSet, TranslateError> {
         let result_terms = nemo_terms![get_vars(left), get_vars(right)];
-        let (left_map_atoms, left_bindings) = self.bind_unbound(left, right);
-        let (right_map_atoms, right_bindings) = self.bind_unbound(right, left);
-        nemo_def!(join(result_terms) :- {left_map_atoms}, left(left_bindings), {right_map_atoms}, right(right_bindings); SolutionSet);
+        let mut maps = nemo_atoms![];
+        let mut left_bindings = get_vars(left);
+        let mut right_bindings = get_vars(right);
+        for v in result_terms.vars() {
+            if get_vars(left).contains(&v) && get_vars(right).contains(&v) && ((!has_prop_for_var(left, IS_DEFINED, &v)) || !has_prop_for_var(right, IS_DEFINED, &v)) {
+                maps = nemo_atoms![maps, &self.unbound_combinations(v, left, right, &mut left_bindings, &mut right_bindings)];
+            }
+        }
+        nemo_def!(join(result_terms) :- {maps}, left(left_bindings), right(right_bindings); SolutionSet);
         Ok(join)
     }
 

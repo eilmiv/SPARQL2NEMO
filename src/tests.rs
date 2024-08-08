@@ -1464,7 +1464,6 @@ fn join() -> Result<(), Error> {
 }
 
 
-
 #[test]
 fn join_undefined() -> Result<(), Error> {
     assert_sparql(
@@ -1484,6 +1483,30 @@ fn join_undefined() -> Result<(), Error> {
             1, 3, 4, 5
             2, 3, 4, 6
             UNDEF, 3, 4, 7
+        "
+    )
+}
+
+
+#[test]
+fn join_multiple_undefined() -> Result<(), Error> {
+    assert_sparql(
+        "
+            prefix ex: <https://example.com/>
+
+            SELECT DISTINCT ?a ?b ?c
+            WHERE
+            {
+                VALUES (?a ?b ?c) {(UNDEF 2 3) (UNDEF 3 4)}
+                VALUES (?a ?b ?c) {(1 2 3) (1 3 UNDEF) (2 3 4) (UNDEF 3 UNDEF) (2 3 6)}
+            }
+        ",
+        "",
+        "
+            1, 2, 3
+            1, 3, 4
+            2, 3, 4
+            UNDEF, 3, 4
         "
     )
 }
