@@ -107,11 +107,11 @@ impl QueryTranslator {
         move |var: &Variable| self.sparql_vars.get(var)
     }
 
-    /// maps all variables of target that are not in source to unbound
+    /// maps all inner variables of target that are not in source to unbound
     fn map_unbound(&self, target: &dyn TypedPredicate, source: &dyn TypedPredicate) -> (BoundPredicate, Vec<VarPtr>) {
         let unbound = VarPtr::new("unbound");
         let unbound_predicate = BoundPredicate::new(self.undefined_val.get_predicate(), vec![Binding::from(&unbound)], false);
-        let vars = get_vars(target).iter().map(|v| if get_vars(source).contains(v) {v.clone()} else {unbound.clone()} ).collect::<Vec<_>>();
+        let vars = target.inner_vars().iter().map(|v| if get_vars(source).contains(v) {v.clone()} else {unbound.clone()} ).collect::<Vec<_>>();
         (unbound_predicate, vars)
     }
 
@@ -1035,41 +1035,82 @@ impl QueryTranslator {
     /// - could optimize left join to not do unbound variables if all variables match (but probably mostly they don't)
     /// - cross join for non overlapping ?
     /// - handle join like/using normal join
+    /// - does dummy_dependency work when recursively applying sparql?
     ///
     /// info:
     /// - did not require negation with existential rules (however existential rules are unreliable)
     /// . consider all cases: identical variables, overlapping variables, non overlapping variables
+    /// - requires dummy dependency to trigger rule order heuristic properly, consider filtered join may be empty
     fn translate_left_join(&mut self, left: &Box<GraphPattern>, right: &Box<GraphPattern>, expression: &Option<Expression>) -> Result<SolutionSet, TranslateError> {
         let left_solution = self.translate_pattern(left)?;
         let right_solution = self.translate_pattern(right)?;
 
         // regular join
-        nemo_def!(raw_join(??both, ??left, ??right) :- left_solution(??both, ??left), right_solution(??both, ??right); SolutionSet);
+        let join = self.translate_join_multi_g(&left_solution, &right_solution)?;
 
         // filtering
-        let filtered_join = match expression {
-            Some(Expression::Exists(pattern)) => {
-                let pattern_solution = self.translate_pattern(pattern)?;
-                let expression_solution = self.translate_positive_exists(&pattern_solution, &raw_join)?;
-                self.translate_filter(&expression_solution, &raw_join)?
-            }
+        let filtered = match expression {
+            None => join,
             Some(e) => {
-                let expression_solution = self.translate_bool_expression(e, &raw_join)?;
-                self.translate_filter(&expression_solution, &raw_join)?
-            },
-            None => raw_join
+                let expr_solution = self.translate_bool_expression(e, &join)?;
+                self.translate_filter_multi_g(&expr_solution, &join)?
+            }
         };
 
-        // add unbound values
-        nemo_def!(left_join(??vars) :- filtered_join(??vars); SolutionSet);
+        // create dummy dependency
+        let dummy_dependency = SolutionSet::create("dummy_dependency", vec![]);
+        nemo_add!(dummy_dependency());
+        nemo_add!(dummy_dependency(nemo_terms![]) :- {&filtered});
+
+        // add bnodes to fill missing values
+        nemo_def!(left_join_proto(??vars, nemo_iri!(defined)) :- filtered(??vars), {&dummy_dependency}; SolutionSet);
+        let map_existential = |v| if !get_vars(&left_solution).contains(v) {Binding::Existential(v.clone())} else {Binding::Variable(v.clone())};
+        let head = nemo_terms![get_vars(&left_join_proto) => map_existential];
+        nemo_add!(left_join_proto(head) :- left_solution(??left), {&dummy_dependency});
+
+        // translate bnodes to unbound
+        nemo_def!(left_join(??join_vars) :- left_join_proto(??join_vars, nemo_iri!(defined)); SolutionSet);
         let (unbound, head) = self.map_unbound(&left_join, &left_solution);
-        nemo_add!(left_join(head) :- left_solution(??left), ~filtered_join(??left, ??right_only), {&unbound});
+        nemo_add!(left_join(head) :- {&unbound}, left_join_proto(??join_vars, ?marker), {nemo_condition!(?marker, " != ", nemo_iri!(defined))});
 
         Ok(left_join)
     }
 
-    fn translate_filter(&mut self, expression: &SolutionExpression, inner: &SolutionSet) -> Result<SolutionSet, TranslateError> {
-        nemo_def!(filter(??expr_vars, ??other_vars) :- inner(??expr_vars, ??other_vars), expression(??expr_vars; @result: true); SolutionSet);
+    /// info:
+    /// - computation via join and filter is part of definition
+    /// - extended demorgan on diff definition
+    ///     - note not false is error or true => errors are not in diff in reality
+    ///     - note nemo handles case ware expr depends on nothing correctly
+    fn translate_left_join_multi(&mut self, left: &Box<GraphPattern>, right: &Box<GraphPattern>, expression: &Option<Expression>) -> Result<SolutionMultiSet, TranslateError> {
+        let left_solution = self.translate_pattern_multi(left)?;
+        let right_solution = self.translate_pattern_multi(right)?;
+        let join = self.translate_join_multi_g(&left_solution, &right_solution)?;
+        let (filtered, diff) = match expression {
+            None => {
+                nemo_def!(diff(@count: ?c; ??left_vars) :- left_solution(@count: ?c; ??left_vars), ~{&join}; SolutionMultiSet);
+                (join, diff)
+            },
+            Some(e) => {
+                let expr_solution = self.translate_bool_expression(e, &join)?;
+                let filtered = self.translate_filter_multi_g(&expr_solution, &join)?;
+                nemo_def!(error(??vars) :- join(??vars), ~{&expr_solution}; SolutionSet);
+                nemo_def!(diff(@count: ?c; ??left_vars) :- left_solution(@count: ?c; ??left_vars), ~{&join}, ~{&error}; SolutionMultiSet);
+                (filtered, diff)
+            }
+        };
+
+        self.translate_union_multi(&filtered, &diff)
+    }
+
+    /// info
+    /// - expression must be bool
+    /// - seq must be remapped to not leve out numbers, therefore not supported
+    fn translate_filter_multi_g<T: TypedPredicate>(&mut self, expression: &SolutionExpression, inner: &T) -> Result<T, TranslateError> {
+        nemo_def!(filter(@?count: ?c; ??expr_vars, ??other_vars) :-
+            inner(@?count: ?c; ??expr_vars, ??other_vars),
+            expression(??expr_vars; @result: true);
+            T
+        );
         Ok(filter)
     }
 
@@ -1081,6 +1122,22 @@ impl QueryTranslator {
         let (right_unbound, right_head) = self.map_unbound(&union, right);
         nemo_add!(union(left_head) :- left(??left), {&left_unbound});
         nemo_add!(union(right_head) :- right(??right), {&right_unbound});
+        Ok(union)
+    }
+
+    /// Notes:
+    /// - check undef
+    /// info:
+    /// - extra negation
+    fn translate_union_multi(&mut self, left: &SolutionMultiSet, right: &SolutionMultiSet) -> Result<SolutionMultiSet, TranslateError> {
+        let union = SolutionMultiSet::create("union", nemo_terms![get_vars(left), get_vars(right)].vars());
+        let (left_unbound, left_head) = self.map_unbound(&union, left);
+        let (right_unbound, right_head) = self.map_unbound(&union, right);
+        let lc = nemo_var!(lc);
+        let rc = nemo_var!(rc);
+        nemo_add!(union(@count: lc.clone() + rc.clone(); ??both, ??left, ??right) :- left(@count: lc; ??both, ??left), right(@count: rc; ??both, ??right));
+        nemo_add!(union(@count: ?c; left_head) :- left(@count: ?c; ??left), {&left_unbound}, ~{right});
+        nemo_add!(union(@count: ?c; right_head) :- right(@count: ?c; ??right), {&right_unbound}, ~{left});
         Ok(union)
     }
 
@@ -1300,12 +1357,12 @@ impl QueryTranslator {
                 let inner_solution = self.translate_pattern(inner)?;
                 let exists_solution = self.translate_pattern(pattern)?;
                 let expr_solution = self.translate_positive_exists(&exists_solution, &inner_solution)?;
-                self.translate_filter(&expr_solution, &inner_solution)
+                self.translate_filter_multi_g(&expr_solution, &inner_solution)
             },
             GraphPattern::Filter {expr, inner} => {
                 let inner_solution = self.translate_pattern(inner)?;
                 let expr_solution = self.translate_bool_expression(expr, &inner_solution)?;
-                self.translate_filter(&expr_solution, &inner_solution)
+                self.translate_filter_multi_g(&expr_solution, &inner_solution)
             }
             GraphPattern::Union {left, right} => {
                 let left_solution = self.translate_pattern(left)?;
@@ -1375,9 +1432,25 @@ impl QueryTranslator {
                 let right_solution = self.translate_pattern_multi(right)?;
                 self.translate_join_multi_g(&left_solution, &right_solution)
             },
-            //GraphPattern::LeftJoin {left, right, expression} => translate_left_join_multi(state, left, right, expression),
-            //GraphPattern::Filter {expr, inner} => translate_filter_multi(state, expr, inner),
-            //GraphPattern::Union {left, right} => translate_union_multi(state, left, right),
+            GraphPattern::LeftJoin {left, right, expression} => {
+                self.translate_left_join_multi(left, right, expression)
+            },
+            GraphPattern::Filter {expr: Expression::Exists(pattern), inner} => {
+                let inner_solution = self.translate_pattern_multi(inner)?;
+                let exists_solution = self.translate_pattern(pattern)?;
+                let expr_solution = self.translate_positive_exists(&exists_solution, &inner_solution)?;
+                self.translate_filter_multi_g(&expr_solution, &inner_solution)
+            },
+            GraphPattern::Filter {expr, inner} => {
+                let inner_solution = self.translate_pattern_multi(inner)?;
+                let expr_solution = self.translate_bool_expression(expr, &inner_solution)?;
+                self.translate_filter_multi_g(&expr_solution, &inner_solution)
+            }
+            GraphPattern::Union {left, right} => {
+                let left_solution = self.translate_pattern_multi(left)?;
+                let right_solution = self.translate_pattern_multi(right)?;
+                self.translate_union_multi(&left_solution, &right_solution)
+            },
             //GraphPattern::Extend {inner, variable, expression} => translate_extend_multi(state, inner, variable, expression),
             //GraphPattern::Minus {left, right} => translate_minus_multi(state, left, right),
             GraphPattern::Values {variables, bindings} => {
@@ -1414,7 +1487,6 @@ impl QueryTranslator {
                 let inner_solution = self.translate_pattern(inner)?;
                 Ok(self.get_sequence(&inner_solution))
             },
-            //GraphPattern::Filter {expr, inner} => {},
             //GraphPattern::Union {left, right} => {},
             //GraphPattern::Extend {inner, variable, expression} => {},
             //Minus
@@ -1440,6 +1512,7 @@ impl QueryTranslator {
             | GraphPattern::Join {left: _, right: _}
             | GraphPattern::LeftJoin {left: _, right: _, expression: _}
             | GraphPattern::Group {aggregates: _, variables: _, inner: _}
+            | GraphPattern::Filter {expr: _, inner: _}
             => {
                 let inner_solution = self.translate_pattern_multi(pattern)?;
                 Ok(self.get_sequence_from_multi(&inner_solution))

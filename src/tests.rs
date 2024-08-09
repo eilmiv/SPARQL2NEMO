@@ -578,6 +578,76 @@ fn filter() -> Result<(), Error> {
     )
 }
 
+
+#[test]
+fn filter_seq() -> Result<(), Error> {
+    assert_sparql(
+        "
+            prefix ex: <https://example.com/>
+
+            SELECT ?a
+            WHERE
+            {
+                ?a ex:p ?b .
+                FILTER(?b)
+            }
+        ",
+        "
+            @prefix ex: <https://example.com/> .
+            @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+            dummy(1) .
+
+            input_graph(1, ex:p, 0) .
+            input_graph(2, ex:p, 1) .
+            input_graph(3, ex:p, 0.0) .
+            input_graph(4, ex:p, 1.0) .
+            input_graph(5, ex:p, \"true\"^^xsd:boolean) .
+            input_graph(6, ex:p, \"false\"^^xsd:boolean) .
+            input_graph(7, ex:p, \"abc\") .
+            input_graph(8, ex:p, \"\") .
+            input_graph(9, ex:p, ex:xyz) .
+            input_graph(0, ex:p, !x) :- dummy(1) .
+         ",
+        "[5; 7; 2; 4]"
+    )
+}
+
+#[test]
+fn filter_multi() -> Result<(), Error> {
+    assert_sparql(
+        "
+            prefix ex: <https://example.com/>
+
+            SELECT ?a
+            WHERE
+            {
+                {
+                    ?a ex:p ?b .
+                    FILTER(?b)
+                }
+                VALUES (?x) {(0)}
+            }
+        ",
+        "
+            @prefix ex: <https://example.com/> .
+            @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+            dummy(1) .
+
+            input_graph(1, ex:p, 0) .
+            input_graph(2, ex:p, 1) .
+            input_graph(3, ex:p, 0.0) .
+            input_graph(4, ex:p, 1.0) .
+            input_graph(5, ex:p, \"true\"^^xsd:boolean) .
+            input_graph(6, ex:p, \"false\"^^xsd:boolean) .
+            input_graph(7, ex:p, \"abc\") .
+            input_graph(8, ex:p, \"\") .
+            input_graph(9, ex:p, ex:xyz) .
+            input_graph(0, ex:p, !x) :- dummy(1) .
+         ",
+        "[5; 7; 2; 4]"
+    )
+}
+
 #[test]
 fn filter_without_effective_boolean_value() -> Result<(), Error> {
     assert_sparql(
