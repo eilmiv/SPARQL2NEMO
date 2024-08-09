@@ -12,6 +12,7 @@ There are special suffixes for functions that do not produce solution sets:
 - `*_seq` for solution sequence: first position of resulting predicate is index in solution sequence
 - `*_multi` for solution multiset (a.k.a. unordered solution sequence): first position of resulting predicate is multiplicity
 - `*_g` for generic implementations supporting multiple types of solutions
+- `*_multi_g` for generic implementations supporting solution multiset and regular solution sets
 
 There are currently many known issues with the existing implementations. 
 

@@ -961,6 +961,8 @@ pub trait TypedPredicate: Debug {
     fn get_predicate(&self) -> PredicatePtr;
     fn clone(&self) -> Self where Self: Sized;
     fn add_optional_named_binding(&self, name: &str) -> Box<dyn Fn(&mut RuleBuilder, ProtoBinding) + '_>;
+    /// The variables that are not in special position
+    fn inner_vars(&self) -> Vec<VarPtr>;
 }
 
 pub fn add_fact(p: &dyn TypedPredicate, fact: Fact){
@@ -1036,6 +1038,10 @@ impl TypedPredicate for Basic {
     fn add_optional_named_binding(&self, _name: &str) -> Box<dyn Fn (&mut RuleBuilder, ProtoBinding) + '_> {
         Box::new(|_builder, _binding| {})
     }
+
+    fn inner_vars(&self) -> Vec<VarPtr> {
+        get_vars(self)
+    }
 }
 
 impl From<&Basic> for ProtoPredicate {
@@ -1079,6 +1085,10 @@ impl TypedPredicate for WithMultiplicity {
             "count" => Box::new(|builder, binding| self.count(builder, binding)),
             _ => Box::new(|_builder, _binding| {})
         }
+    }
+
+    fn inner_vars(&self) -> Vec<VarPtr> {
+        get_vars(self).into_iter().skip(1).collect()
     }
 }
 
@@ -1147,6 +1157,15 @@ macro_rules! nemo_predicate_type {
                     )*
                     _ => Box::new(|_builder, _binding| {})
                 }
+            }
+
+            fn inner_vars(&self) -> Vec<crate::nemo_model::VarPtr> {
+                let vars = crate::nemo_model::get_vars(self);
+                vars.iter()
+                    .skip($type_name::FRONT_POSITIONS.len())
+                    .take(vars.len() - $type_name::FRONT_POSITIONS.len() - $type_name::BACK_POSITIONS.len())
+                    .map(|v| v.clone())
+                    .collect()
             }
         }
 
@@ -1448,8 +1467,8 @@ fn binding_parts<'a, 'b>(proto_bindings: &'a Vec<ProtoBinding>, vars: &'b Vec<Va
         }
     }
     let var_strings: Vec<String> = vars.iter().map(|v| v.to_string()).collect();
-    assert!(total_start_len <= vars.len(), "can not bind {} (front) variables to positions [{}]", start_len, var_strings.join(", "));
-    assert!(total_start_len <= (vars.len() - total_end_len), "{} front and {} back variables are too much for [{}]", start_len, end_len, var_strings.join(", "));
+    assert!(total_start_len <= vars.len(), "can not bind {} (front) variables to positions [{}]", total_start_len, var_strings.join(", "));
+    assert!(total_start_len <= (vars.len() - total_end_len), "{} front and {} back variables are too much for [{}]", total_start_len, total_end_len, var_strings.join(", "));
 
     (
         &proto_bindings[..start_len],

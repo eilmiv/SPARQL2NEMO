@@ -20,8 +20,7 @@ const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
 
 impl SolutionExpression {
     fn depend_vars(&self) -> Vec<VarPtr> {
-        let vars = self.get_predicate().vars();
-        vars[..vars.len() - 1].iter().map(|v| v.clone()).collect()
+        self.inner_vars()
     }
 
     fn result_var(&self) -> VarPtr {
@@ -336,14 +335,42 @@ impl QueryTranslator {
         );
         Ok(op)
     }
+    /// a specialized function of [QueryTranslator::unbound_combinations] for [QueryTranslator::translate_exists]
+    fn unbound_combinations_left_focus(&mut self, var: VarPtr, left: &dyn TypedPredicate, right: &dyn TypedPredicate, right_bindings_update: &mut Vec<VarPtr>) -> BoundPredicate {
+        let map = self.unbound_join_map(var.clone(), left, right);
+
+        // generate new helper variables
+        let join_result = VarPtr::new("join_result");
+        let right = VarPtr::new("right");
+        let update_pos_right = var_posses(right_bindings_update, &var);
+        for i in update_pos_right {
+            right_bindings_update[i] = right.clone();
+        }
+        BoundPredicate::new(
+            map.get_predicate(),
+            vec![Binding::Variable(join_result), Binding::Variable(var), Binding::Variable(right)],
+            false
+        )
+    }
 
     fn translate_positive_exists(&mut self, pattern_solution: &SolutionSet, binding: &dyn TypedPredicate) -> Result<SolutionExpression, TranslateError> {
-        nemo_def!(partial_exists(??intersection; @result: true) :- pattern_solution(??intersection, ??pattern_only), binding(??intersection, ??other); SolutionExpression);
+        let result_terms: Vec<_> = get_vars(binding).into_iter().filter(|v| get_vars(pattern_solution).contains(v)).collect();
+        let mut maps = nemo_atoms![];
+        let mut pattern_bindings = get_vars(pattern_solution);
+        for v in &result_terms {
+            if (!has_prop_for_var(binding, IS_DEFINED, v)) || !has_prop_for_var(pattern_solution, IS_DEFINED, v) {
+                maps = nemo_atoms![maps, &self.unbound_combinations_left_focus(v.clone(), binding, pattern_solution, &mut pattern_bindings)];
+            }
+        }
+        nemo_def!(partial_exists(result_terms; @result: true) :- {maps}, {binding}, pattern_solution(pattern_bindings); SolutionExpression);
         Ok(partial_exists)
     }
 
     /// info
     /// - Consider current bindings to restrict and therefore optimize inner pattern for EXISTS
+    /// - asymmetry towards binding only with unbound considerations
+    /// - definition "replace every variable with its binding" may lead to syntax error -> see tests on virtuoso
+    /// - would be more efficient with its own function because the actual join result is ignored
     fn translate_exists(&mut self, pattern_solution: &SolutionSet, binding: &dyn TypedPredicate) -> Result<SolutionExpression, TranslateError> {
         let partial_exists = self.translate_positive_exists(pattern_solution, binding)?;
         nemo_def!(exists(??vars; @result: true) :- partial_exists(??vars; @result: true); SolutionExpression);
@@ -928,15 +955,11 @@ impl QueryTranslator {
         }
     }
 
-    /// binds unbound values in with_undef to all possible values in bindings_from
-    /// info:
-    /// - unbound, unbound, unbound is automatically infered by first case
-    /// - if only one of the sides is unbound the firs position of the result is marked as always defined automatically
-    fn unbound_combinations(&mut self, var: VarPtr, left: &SolutionSet, right: &SolutionSet, left_bindings_update: &mut Vec<VarPtr>, right_bindings_update: &mut Vec<VarPtr>) -> BoundPredicate {
+    fn unbound_join_map(&mut self, var: VarPtr, left: &dyn TypedPredicate, right: &dyn TypedPredicate) -> SolutionSet {
         let unbound_val = self.undefined_val.clone();
 
         // initial join on all values that are always bound + var
-        let rename_var_in = |rename_var: VarPtr, pred: &SolutionSet| -> VarPtr {
+        let rename_var_in = |rename_var: VarPtr, pred: &dyn TypedPredicate| -> VarPtr {
             // var and variables that are never undefined will still have the same name in left and right after renaming
             if rename_var == var { return rename_var }
             if has_prop_for_var(pred, IS_DEFINED, &rename_var) { return rename_var }
@@ -956,9 +979,22 @@ impl QueryTranslator {
             nemo_add!(map(var, var, ?unbound) :- {left}, unbound_val(?unbound));
         }
 
+        map
+    }
+
+    /// binds unbound values in with_undef to all possible values in bindings_from
+    /// note that there is also a variant for translate_exists
+    /// info:
+    /// - unbound, unbound, unbound is automatically infered by first case
+    /// - if only one of the sides is unbound the firs position of the result is marked as always defined automatically
+    fn unbound_combinations(&mut self, var: VarPtr, left: &dyn TypedPredicate, right: &dyn TypedPredicate, left_bindings_update: &mut Vec<VarPtr>, right_bindings_update: &mut Vec<VarPtr>, extra_vars: &mut Vec<VarPtr>) -> BoundPredicate {
+        let map = self.unbound_join_map(var.clone(), left, right);
+
         // generate new helper variables
         let left = VarPtr::new("left");
         let right = VarPtr::new("right");
+        extra_vars.push(left.clone());
+        extra_vars.push(right.clone());
         let update_pos_left = var_posses(left_bindings_update, &var);
         let update_pos_right = var_posses(right_bindings_update, &var);
         for i in update_pos_left {
@@ -976,17 +1012,20 @@ impl QueryTranslator {
 
     /// info:
     /// - different join algorithms possible (maybe prove equivalence?)
-    fn translate_join(&mut self, left: &SolutionSet, right: &SolutionSet) -> Result<SolutionSet, TranslateError> {
-        let result_terms = nemo_terms![get_vars(left), get_vars(right)];
+    fn translate_join_multi_g<T: TypedPredicate>(&mut self, left: &T, right: &T) -> Result<T, TranslateError> {
+        let result_terms = nemo_terms![left.inner_vars(), right.inner_vars()];
         let mut maps = nemo_atoms![];
-        let mut left_bindings = get_vars(left);
-        let mut right_bindings = get_vars(right);
+        let mut left_bindings = left.inner_vars();
+        let mut right_bindings = right.inner_vars();
+        let mut extra_vars = Vec::new();
         for v in result_terms.vars() {
             if get_vars(left).contains(&v) && get_vars(right).contains(&v) && ((!has_prop_for_var(left, IS_DEFINED, &v)) || !has_prop_for_var(right, IS_DEFINED, &v)) {
-                maps = nemo_atoms![maps, &self.unbound_combinations(v, left, right, &mut left_bindings, &mut right_bindings)];
+                maps = nemo_atoms![maps, &self.unbound_combinations(v, left, right, &mut left_bindings, &mut right_bindings, &mut extra_vars)];
             }
         }
-        nemo_def!(join(result_terms) :- {maps}, left(left_bindings), right(right_bindings); SolutionSet);
+        let cl = nemo_var!(cl);
+        let cr = nemo_var!(cr);
+        nemo_def!(join(@?count: %sum(cl.clone() * cr.clone(), extra_vars); result_terms) :- {maps}, left(@?count: cl; left_bindings), right(@?count: cr; right_bindings); T);
         Ok(join)
     }
 
@@ -1078,6 +1117,17 @@ impl QueryTranslator {
         for binding in bindings {
             let terms: Vec<Binding> = binding.iter().map(|b| self.translate_ground_term(b, &undef)).collect();
             nemo_add!(values(terms) :- undef_pred(undef));
+        }
+        values
+    }
+
+    fn translate_values_seq(&mut self, variables: &Vec<Variable>, bindings: &Vec<Vec<Option<GroundTerm>>>) -> SolutionSequence {
+        let values = SolutionSequence::create("values", nemo_terms!(nemo_var!(index), variables => self.translate_var_func()).vars());
+        let undef = nemo_var!(undef);
+        let undef_pred = self.undefined_val.clone();
+        for (i, binding) in bindings.iter().enumerate() {
+            let terms: Vec<Binding> = binding.iter().map(|b| self.translate_ground_term(b, &undef)).collect();
+            nemo_add!(values(@index: i; terms) :- undef_pred(undef));
         }
         values
     }
@@ -1241,7 +1291,7 @@ impl QueryTranslator {
             GraphPattern::Join{left, right} => {
                 let left_solution = self.translate_pattern(left)?;
                 let right_solution = self.translate_pattern(right)?;
-                self.translate_join(&left_solution, &right_solution)
+                self.translate_join_multi_g(&left_solution, &right_solution)
             }
             GraphPattern::LeftJoin {left, right, expression} => {
                 self.translate_left_join(left, right, expression)
@@ -1306,6 +1356,8 @@ impl QueryTranslator {
         }
     }
 
+    /// info
+    /// - values from seq does not lead to unstratified program because values are constant. -> required to avoid inconsistent normalization
     fn translate_pattern_multi(&mut self, pattern: &GraphPattern) -> Result<SolutionMultiSet, TranslateError> {
         match pattern {
             GraphPattern::Bgp{patterns} => self.translate_bgp_multi(patterns),
@@ -1318,13 +1370,20 @@ impl QueryTranslator {
                         Some(translate_node(object)?)
                     )?
                 )),*/
-            //GraphPattern::Join {left, right} => translate_join_multi(state, left, right),
+            GraphPattern::Join {left, right} => {
+                let left_solution = self.translate_pattern_multi(left)?;
+                let right_solution = self.translate_pattern_multi(right)?;
+                self.translate_join_multi_g(&left_solution, &right_solution)
+            },
             //GraphPattern::LeftJoin {left, right, expression} => translate_left_join_multi(state, left, right, expression),
             //GraphPattern::Filter {expr, inner} => translate_filter_multi(state, expr, inner),
             //GraphPattern::Union {left, right} => translate_union_multi(state, left, right),
             //GraphPattern::Extend {inner, variable, expression} => translate_extend_multi(state, inner, variable, expression),
             //GraphPattern::Minus {left, right} => translate_minus_multi(state, left, right),
-            //GraphPattern::Values {variables, bindings} => translate_values_multi(state, variables, bindings),
+            GraphPattern::Values {variables, bindings} => {
+                let value_seq = self.translate_values_seq(variables, bindings);
+                Ok(self.get_multi_from_sequence(&value_seq))
+            },
             //GraphPattern::OrderBy {inner, expression: _} => translate_order_by_multi(state, inner),
             GraphPattern::Project{inner, variables} => {
                 let inner_solution = self.translate_pattern_multi(inner)?;
@@ -1359,7 +1418,9 @@ impl QueryTranslator {
             //GraphPattern::Union {left, right} => {},
             //GraphPattern::Extend {inner, variable, expression} => {},
             //Minus
-            //Values
+            GraphPattern::Values {variables, bindings} => {
+                Ok(self.translate_values_seq(variables, bindings))
+            },
             GraphPattern::OrderBy {inner, expression} => {
                 let inner_solution = self.translate_pattern_seq(inner)?;
                 self.translate_order_by_seq(&inner_solution, expression)

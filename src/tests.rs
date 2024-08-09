@@ -928,6 +928,56 @@ fn exists() -> Result<(), Error> {
     Ok(())
 }
 
+
+#[test]
+fn exists_unbound_pattern() -> Result<(), Error> {
+    let sparql = "
+        prefix ex: <https://example.com/>
+
+        SELECT DISTINCT ?x
+        WHERE
+        {
+            ?a ex:p ?x .
+            FILTER EXISTS {VALUES (?x) {(UNDEF)}}
+        }
+    ";
+    assert_sparql(
+        sparql,
+        "
+            @prefix ex: <https://example.com/> .
+
+            input_graph(1, ex:p, 2) .
+            input_graph(1, ex:p, 3) .
+         ",
+        "2; 3"
+    )
+}
+
+
+#[test]
+fn exists_unbound_bindings() -> Result<(), Error> {
+    let sparql = "
+        prefix ex: <https://example.com/>
+
+        SELECT DISTINCT ?x
+        WHERE
+        {
+            VALUES (?x) {(UNDEF) (2)}
+            FILTER EXISTS {?a ex:p ?x}
+        }
+    ";
+    assert_sparql(
+        sparql,
+        "
+            @prefix ex: <https://example.com/> .
+
+            input_graph(1, ex:p, 2) .
+            input_graph(1, ex:p, 3) .
+         ",
+        "UNDEF; 2"
+    )
+}
+
 #[test]
 fn not_exists() -> Result<(), Error> {
     let sparql = "
@@ -1508,6 +1558,58 @@ fn join_multiple_undefined() -> Result<(), Error> {
             2, 3, 4
             UNDEF, 3, 4
         "
+    )
+}
+
+
+#[test]
+fn join_multi() -> Result<(), Error> {
+    assert_sparql(
+        "
+            prefix ex: <https://example.com/>
+
+            SELECT ?a ?b ?c
+            WHERE
+            {
+                VALUES (?a ?b ?c) {(1 2 3) (1 2 3) (4 5 6) (7 8 9)}
+                VALUES (?a ?b ?c) {(1 2 3) (1 2 3) (4 5 6) (4 5 6)}
+            }
+        ",
+        "",
+        "[
+            1, 2, 3
+            1, 2, 3
+            1, 2, 3
+            1, 2, 3
+            4, 5, 6
+            4, 5, 6
+        ]"
+    )
+}
+
+
+#[test]
+fn join_multi_where_different_join_combinations_map_to_one() -> Result<(), Error> {
+    assert_sparql(
+        "
+            prefix ex: <https://example.com/>
+
+            SELECT ?a ?b ?c
+            WHERE
+            {
+                VALUES (?a ?b ?c) {(UNDEF 2 3) (1 2 3) (4 5 6) (7 8 9)}
+                VALUES (?a ?b ?c) {(1 2 3) (1 2 3) (4 5 6) (4 5 6)}
+            }
+        ",
+        "",
+        "[
+            1, 2, 3
+            1, 2, 3
+            1, 2, 3
+            1, 2, 3
+            4, 5, 6
+            4, 5, 6
+        ]"
     )
 }
 
