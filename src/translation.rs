@@ -111,8 +111,12 @@ impl QueryTranslator {
     fn map_unbound(&self, target: &dyn TypedPredicate, source: &dyn TypedPredicate) -> (BoundPredicate, Vec<VarPtr>) {
         let unbound = VarPtr::new("unbound");
         let unbound_predicate = BoundPredicate::new(self.undefined_val.get_predicate(), vec![Binding::from(&unbound)], false);
-        let vars = target.inner_vars().iter().map(|v| if get_vars(source).contains(v) {v.clone()} else {unbound.clone()} ).collect::<Vec<_>>();
+        let vars = Self::insert_unbound(target, source, &unbound);
         (unbound_predicate, vars)
+    }
+
+    fn insert_unbound(target: &dyn TypedPredicate, source: &dyn TypedPredicate, unbound: &VarPtr) -> Vec<VarPtr> {
+        target.inner_vars().iter().map(|v| if get_vars(source).contains(v) { v.clone() } else { unbound.clone() }).collect()
     }
 
     /// info
@@ -370,6 +374,7 @@ impl QueryTranslator {
     /// - Consider current bindings to restrict and therefore optimize inner pattern for EXISTS
     /// - asymmetry towards binding only with unbound considerations
     /// - definition "replace every variable with its binding" may lead to syntax error -> see tests on virtuoso
+    ///     - the current behaviour is beneficial also for LeftJoin
     /// - would be more efficient with its own function because the actual join result is ignored
     fn translate_exists(&mut self, pattern_solution: &SolutionSet, binding: &dyn TypedPredicate) -> Result<SolutionExpression, TranslateError> {
         let partial_exists = self.translate_positive_exists(pattern_solution, binding)?;
@@ -534,6 +539,7 @@ impl QueryTranslator {
     /// - there is fn:reverse however those work on sequences and SPARQL defines to translate to call on sequence of "single node" and there is even an example:
     ///     - fn:reverse(("hello")) returns ("hello").
     /// - considerations about STRLEN
+    /// - expressions are never UNDEF -> no need to consider undef in isIRI, isBnode or STR
     fn translate_function(&mut self, func: &Function, parameter_expressions: &Vec<Expression>, binding: &dyn TypedPredicate) -> Result<SolutionExpression, TranslateError> {
         let params = parameter_expressions.iter().map(|e| self.translate_expression(e, binding)).collect::<Result<Vec<_>, _>>()?;
         match func {
@@ -1029,18 +1035,15 @@ impl QueryTranslator {
         Ok(join)
     }
 
-    /// notes
-    /// - changed left join to call the filter also on the unbound variables, is this correct?
-    /// 	- changed back because filtered values should probably lead to unbound values
-    /// - could optimize left join to not do unbound variables if all variables match (but probably mostly they don't)
-    /// - cross join for non overlapping ?
-    /// - handle join like/using normal join
-    /// - does dummy_dependency work when recursively applying sparql?
     ///
     /// info:
     /// - did not require negation with existential rules (however existential rules are unreliable)
     /// . consider all cases: identical variables, overlapping variables, non overlapping variables
     /// - requires dummy dependency to trigger rule order heuristic properly, consider filtered join may be empty
+    /// - non trivial on what the filter should be evaluated (at the end, on the optional part, on the join)
+    /// - cross join for non overlapping
+    /// - error in expression changed to be correct in sparql 1.2
+    /// - tested that dummy_dependency works with recursive sparql
     fn translate_left_join(&mut self, left: &Box<GraphPattern>, right: &Box<GraphPattern>, expression: &Option<Expression>) -> Result<SolutionSet, TranslateError> {
         let left_solution = self.translate_pattern(left)?;
         let right_solution = self.translate_pattern(right)?;
@@ -1081,20 +1084,26 @@ impl QueryTranslator {
     /// - extended demorgan on diff definition
     ///     - note not false is error or true => errors are not in diff in reality
     ///     - note nemo handles case ware expr depends on nothing correctly
+    ///     - in sparql 1.2 errors don't break things
+    /// - would have computed join and negated in second step also without exists
     fn translate_left_join_multi(&mut self, left: &Box<GraphPattern>, right: &Box<GraphPattern>, expression: &Option<Expression>) -> Result<SolutionMultiSet, TranslateError> {
         let left_solution = self.translate_pattern_multi(left)?;
         let right_solution = self.translate_pattern_multi(right)?;
         let join = self.translate_join_multi_g(&left_solution, &right_solution)?;
         let (filtered, diff) = match expression {
             None => {
-                nemo_def!(diff(@count: ?c; ??left_vars) :- left_solution(@count: ?c; ??left_vars), ~{&join}; SolutionMultiSet);
+                nemo_def!(base_join(??vars) :- join(@count: ?c; ??vars); SolutionSet);
+                let exists = self.translate_exists(&base_join, &left_solution)?;
+                nemo_def!(diff(@count: ?c; ??e, ??vars) :- left_solution(@count: ?c; ??e, ??vars), exists(??e; @result: false); SolutionMultiSet);
                 (join, diff)
             },
             Some(e) => {
                 let expr_solution = self.translate_bool_expression(e, &join)?;
                 let filtered = self.translate_filter_multi_g(&expr_solution, &join)?;
-                nemo_def!(error(??vars) :- join(??vars), ~{&expr_solution}; SolutionSet);
-                nemo_def!(diff(@count: ?c; ??left_vars) :- left_solution(@count: ?c; ??left_vars), ~{&join}, ~{&error}; SolutionMultiSet);
+                // nemo_def!(error(??left) :- left_solution(@count: ?cl; ??left), join(@count: ?cj; ??left, ??right_only), ~{&expr_solution}; SolutionSet);
+                nemo_def!(base_filtered_join(??vars) :- filtered(@count: ?c; ??vars); SolutionSet);
+                let exists = self.translate_exists(&base_filtered_join, &left_solution)?;
+                nemo_def!(diff(@count: ?c; ??e, ??left_vars) :- left_solution(@count: ?c; ??e, ??left_vars), exists(??e; @result: false); SolutionMultiSet);
                 (filtered, diff)
             }
         };
@@ -1125,19 +1134,42 @@ impl QueryTranslator {
         Ok(union)
     }
 
-    /// Notes:
-    /// - check undef
     /// info:
     /// - extra negation
+    /// - this is more complicated than union_seq but is required for left join
     fn translate_union_multi(&mut self, left: &SolutionMultiSet, right: &SolutionMultiSet) -> Result<SolutionMultiSet, TranslateError> {
-        let union = SolutionMultiSet::create("union", nemo_terms![get_vars(left), get_vars(right)].vars());
-        let (left_unbound, left_head) = self.map_unbound(&union, left);
-        let (right_unbound, right_head) = self.map_unbound(&union, right);
+        let union = SolutionMultiSet::create("union", nemo_terms![nemo_var!(count), left.inner_vars(), right.inner_vars()].vars());
+
+        // solutions that occur in both sides
         let lc = nemo_var!(lc);
         let rc = nemo_var!(rc);
-        nemo_add!(union(@count: lc.clone() + rc.clone(); ??both, ??left, ??right) :- left(@count: lc; ??both, ??left), right(@count: rc; ??both, ??right));
-        nemo_add!(union(@count: ?c; left_head) :- left(@count: ?c; ??left), {&left_unbound}, ~{right});
-        nemo_add!(union(@count: ?c; right_head) :- right(@count: ?c; ??right), {&right_unbound}, ~{left});
+        let unbound = VarPtr::new("unbound");
+        let left_body = Self::insert_unbound(left, right, &unbound);
+        let right_body = Self::insert_unbound(right, left, &unbound);
+        let union_head = union.inner_vars().iter()
+            .map(|v| if get_vars(right).contains(v) && get_vars(left).contains(v) {v.clone()} else {unbound.clone()} )
+            .collect::<Vec<_>>();
+        let unbound_val = self.undefined_val.clone();
+        nemo_add!(union(@count: lc.clone() + rc.clone(); union_head) :- left(@count: lc; left_body), right(@count: rc; right_body), unbound_val(unbound));
+
+        // solutions that occur only in one side
+        let (left_unbound, left_head) = self.map_unbound(&union, left);
+        let (right_unbound, right_head) = self.map_unbound(&union, right);
+        nemo_add!(union(@count: ?c; left_head) :- left(@count: ?c; ??left), {&left_unbound}, ~right(@count: ?rc; right_body));
+        nemo_add!(union(@count: ?c; right_head) :- right(@count: ?c; ??right), {&right_unbound}, ~left(@count: ?lc; left_body));
+        Ok(union)
+    }
+
+    fn translate_union_seq(&mut self, left: &SolutionSequence, right: &SolutionSequence) -> Result<SolutionSequence, TranslateError> {
+        let union = SolutionSequence::create("union", nemo_terms![nemo_var!(idx), left.inner_vars(), right.inner_vars()].vars());
+        let (left_unbound, left_head) = self.map_unbound(&union, left);
+        let (right_unbound, right_head) = self.map_unbound(&union, right);
+
+        let i = nemo_var!(i);
+        nemo_def!(offset(%count(?idx)) :- left(@index: ?idx; ??left_vars); SolutionExpression);
+        nemo_add!(union(@index: i.clone(); left_head) :- left(@index: i.clone(); ??left), {&left_unbound});
+        nemo_add!(union(@index: i.clone() + offset.result_var(); right_head) :- right(@index: i.clone(); ??right), {&right_unbound}, {&offset});
+
         Ok(union)
     }
 
@@ -1191,6 +1223,7 @@ impl QueryTranslator {
 
     /// notes
     /// - this is wrong for multi sets, you might have to combine things that become the same after projection
+    /// - handle projected variables that do not occur in body (map to UNDEF)
     fn translate_project_g<T: TypedPredicate>(&mut self, inner: &T, variables: &Vec<Variable>) -> Result<T, TranslateError> {
         nemo_def!(projection(@?count: ?c, @?index: ?i; nemo_terms!(variables => self.translate_var_func())) :- inner(@?count: ?x, @?index: ?i; ??all_vars); T);
         Ok(projection)
@@ -1487,7 +1520,11 @@ impl QueryTranslator {
                 let inner_solution = self.translate_pattern(inner)?;
                 Ok(self.get_sequence(&inner_solution))
             },
-            //GraphPattern::Union {left, right} => {},
+            GraphPattern::Union {left, right} => {
+                let left_solution = self.translate_pattern_seq(left)?;
+                let right_solution = self.translate_pattern_seq(right)?;
+                self.translate_union_seq(&left_solution, &right_solution)
+            },
             //GraphPattern::Extend {inner, variable, expression} => {},
             //Minus
             GraphPattern::Values {variables, bindings} => {

@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use nemo::datavalues::AnyDataValue;
 use nemo::error::Error;
 use nemo::execution::{DefaultExecutionEngine, ExecutionEngine};
@@ -45,21 +45,58 @@ fn any_data_values_to_string(vec: Vec<Vec<AnyDataValue>>) -> HashSet<Vec<String>
         .collect()
 }
 
-fn compare_vecs(vec: Vec<Vec<AnyDataValue>>, expectation: &str) -> Result<(), String> {
-    let expected_set: HashSet<Vec<String>> = parse_expectation(expectation).into_iter().collect();
-    let actual_set: HashSet<Vec<String>> = any_data_values_to_string(vec);
+fn strip_index(row: &Vec<String>) -> Vec<String> {
+    row.iter().skip(1).cloned().collect()
+}
 
-    let missing: Vec<Vec<String>> = expected_set.difference(&actual_set).cloned().collect();
-    let extra: Vec<Vec<String>> = actual_set.difference(&expected_set).cloned().collect();
+fn build_frequency_map(set: &HashSet<Vec<String>>, strip: bool) -> HashMap<Vec<String>, usize> {
+    let mut map = HashMap::new();
+    for row in set {
+        let key = if strip { strip_index(row) } else { row.clone() };
+        *map.entry(key).or_insert(0) += 1;
+    }
+    map
+}
 
-    if !missing.is_empty() || !extra.is_empty() {
+fn compare_sets(
+    expected_set: &HashSet<Vec<String>>,
+    actual_set: &HashSet<Vec<String>>,
+    strip: bool
+) -> Result<(), String> {
+    let expected_map = build_frequency_map(expected_set, strip);
+    let actual_map = build_frequency_map(actual_set, strip);
+
+    let mut extra_rows = vec![];
+    let mut missing_rows = vec![];
+
+    // Find missing rows in the actual_set
+    for (row, expected_count) in &expected_map {
+        let actual_count = actual_map.get(row).unwrap_or(&0);
+        if actual_count < expected_count {
+            for _ in 0..(expected_count - actual_count) {
+                missing_rows.push(row.clone());
+            }
+        }
+    }
+
+    // Find extra rows in the actual_set
+    for (row, actual_count) in &actual_map {
+        let expected_count = expected_map.get(row).unwrap_or(&0);
+        if actual_count > expected_count {
+            for _ in 0..(actual_count - expected_count) {
+                extra_rows.push(row.clone());
+            }
+        }
+    }
+
+    if !missing_rows.is_empty() || !extra_rows.is_empty() {
         let mut error_message = String::new();
 
-        if !missing.is_empty() {
+        if !missing_rows.is_empty() {
             error_message.push_str(
                 &format!(
                     "Missing rows:\n{}\n",
-                    missing
+                    missing_rows
                         .into_iter()
                         .map(|row| row.join(", "))
                         .collect::<Vec<_>>()
@@ -68,11 +105,11 @@ fn compare_vecs(vec: Vec<Vec<AnyDataValue>>, expectation: &str) -> Result<(), St
             );
         }
 
-        if !extra.is_empty() {
+        if !extra_rows.is_empty() {
             error_message.push_str(
                 &format!(
                     "Extra rows:\n{}\n",
-                    extra
+                    extra_rows
                         .into_iter()
                         .map(|row| row.join(", "))
                         .collect::<Vec<_>>()
@@ -87,21 +124,37 @@ fn compare_vecs(vec: Vec<Vec<AnyDataValue>>, expectation: &str) -> Result<(), St
     Ok(())
 }
 
-fn assert_nemo(program: String, inputs: &str, expectation: &str) -> Result<(), Error> {
+fn compare_expectations(expect: &str, actual: &str, allow_reorder: bool) -> Result<(), String> {
+    let expect_set: HashSet<Vec<String>> = parse_expectation(expect).into_iter().collect();
+    let actual_set: HashSet<Vec<String>> = parse_expectation(actual).into_iter().collect();
+    compare_sets(&expect_set, &actual_set, allow_reorder)
+}
+
+fn assert_nemo(program: String, inputs: &str, expectation: &str, allow_reorder: bool) -> Result<(), Error> {
     let result = execute_nemo(format!("{}\n{}", inputs, program))?;
-    match compare_vecs(result, expectation) {
+    let expected_set: HashSet<Vec<String>> = parse_expectation(expectation).into_iter().collect();
+    let actual_set: HashSet<Vec<String>> = any_data_values_to_string(result);
+    match compare_sets(&expected_set, &actual_set, allow_reorder) {
         Ok(()) => Ok(()),
         Err(message) => panic!("{}", message),
     }
 }
 
-fn assert_sparql(sparql: &str, inputs: &str, expectation: &str) -> Result<(), Error> {
+fn assert_sparql_impl(sparql: &str, inputs: &str, expectation: &str, allow_reorder: bool) -> Result<(), Error> {
     let translation_result = translate(sparql);
     let nemo_program = match translation_result {
         Ok(program) => program,
         Err(translation_error) => panic!("{:#?}", translation_error),
     };
-    assert_nemo(nemo_program, inputs, expectation)
+    assert_nemo(nemo_program, inputs, expectation, allow_reorder)
+}
+
+fn assert_sparql(sparql: &str, inputs: &str, expectation: &str) -> Result<(), Error> {
+    assert_sparql_impl(sparql, inputs, expectation, false)
+}
+
+fn assert_sparql_multi(sparql: &str, inputs: &str, expectation: &str) -> Result<(), Error> {
+    assert_sparql_impl(sparql, inputs, expectation, true)
 }
 
 
@@ -111,11 +164,27 @@ fn testing_works() {
 }
 
 #[test]
+fn test_compare_sets() {
+    assert_eq!(compare_expectations("[1, abc; 2, def]", "[1, abc; 2, def]", false), Ok(()));
+    assert_eq!(compare_expectations("[1, abc; 2, def; 3, ghi]", "[1, abc; 2, def]", false), Err("Missing rows:\n2, 3, ghi\n".to_string()));
+    assert_eq!(compare_expectations("[1, abc; 2, def]", "[1, abc; 2, def; 3, ghi]", false), Err("Extra rows:\n2, 3, ghi\n".to_string()));
+    assert_eq!(compare_expectations("[1, abc; 2, def; 3, ghi]", "[1, abc; 2, def; 4, jkl]", false), Err("Missing rows:\n2, 3, ghi\nExtra rows:\n2, 4, jkl\n".to_string()));
+    assert_eq!(compare_expectations("[1, abc; 2, def]", "[2, def; 1, abc]", true), Ok(()));
+    assert_eq!(compare_expectations("[1, abc; 1, abc]", "[1, abc]", true), Err("Missing rows:\n1, abc\n".to_string()));
+
+    assert_eq!(compare_expectations("1, abc; 2, def", "1, abc; 2, def", false), Ok(()));
+    assert_eq!(compare_expectations("1, abc; 2, def; 3, ghi", "1, abc; 2, def", false), Err("Missing rows:\n3, ghi\n".to_string()));
+    assert_eq!(compare_expectations("1, abc; 2, def", "1, abc; 2, def; 3, ghi", false), Err("Extra rows:\n3, ghi\n".to_string()));
+    assert_eq!(compare_expectations("1, abc; 2, def; 3, ghi", "1, abc; 2, def; 4, jkl", false), Err("Missing rows:\n3, ghi\nExtra rows:\n4, jkl\n".to_string()));
+}
+
+#[test]
 fn nemo_working() -> Result<(), Error>{
     assert_nemo(
         "p(1, 2) .\n@output p .".to_string(),
         "p(3, 5) .",
-        "1, 2; 3, 5"
+        "1, 2; 3, 5",
+        false
     )
 }
 
@@ -129,7 +198,8 @@ fn nemo_not_working() -> Result<(), Error>{
             in_1(1) .
             in_2(1.0) .
         ",
-        ""
+        "",
+        false
     )
 }
 
@@ -645,6 +715,24 @@ fn filter_multi() -> Result<(), Error> {
             input_graph(0, ex:p, !x) :- dummy(1) .
          ",
         "[5; 7; 2; 4]"
+    )
+}
+
+#[test]
+fn filter_multiplicity() -> Result<(), Error> {
+    assert_sparql(
+        "
+            prefix ex: <https://example.com/>
+
+            SELECT ?a
+            WHERE
+            {
+                VALUES (?a) {(ex:error) (0) (1) (2) (2)}
+                FILTER(?a)
+            }
+        ",
+        "",
+        "[1; 2; 2]"
     )
 }
 
@@ -1753,6 +1841,42 @@ fn left_join_filter() -> Result<(), Error> {
     )
 }
 
+
+#[test]
+fn left_join_filter_recursive() -> Result<(), Error> {
+    assert_sparql(
+        "
+            prefix ex: <https://example.com/>
+
+            SELECT DISTINCT ?x ?b
+            WHERE
+            {
+                ?x ex:a ?a .
+                OPTIONAL {
+                    ?x ex:b ?b
+                    FILTER(?b < 10)
+                }
+            }
+        ",
+        "
+            @prefix ex: <https://example.com/> .
+
+            input_graph(1, ex:a, 0) .
+            input_graph(1, ex:b, 0) .
+            input_graph(2, ex:a, 5) .
+            input_graph(2, ex:b, 5) .
+            input_graph(3, ex:a, 0) .
+            input_graph(?n, ex:b, ?v + 1) :- projection(?n, ?v) .
+            input_graph(3, ex:b, 0) :- projection(?n, ?v), ?n != 3, undefined_val(?v) .  % to fail more spectacularly
+         ",
+        "
+            1, 0; 1, 1; 1, 2; 1, 3; 1, 4; 1, 5; 1, 6; 1, 7; 1, 8; 1, 9
+            2, 5; 2, 6; 2, 7; 2, 8; 2, 9
+            3, UNDEF
+        "
+    )
+}
+
 #[test]
 fn left_join_positive_exists() -> Result<(), Error> {
     let sparql = "
@@ -1788,6 +1912,141 @@ fn left_join_positive_exists() -> Result<(), Error> {
             4, 41, UNDEF
             5, 51, UNDEF
         "
+    )
+}
+
+
+#[test]
+fn left_join_multi_simple() -> Result<(), Error> {
+    assert_sparql_multi(
+        "
+            prefix ex: <https://example.com/>
+
+            SELECT ?x ?a ?b
+            WHERE
+            {
+                ?x ex:a ?a .
+                OPTIONAL { ?x ex:b ?b } .
+            }
+        ",
+        "
+            @prefix ex: <https://example.com/> .
+
+            input_graph(1, ex:a, 11) .
+            input_graph(1, ex:b, 12) .
+            input_graph(2, ex:other, 21) .
+            input_graph(3, ex:a, 31) .
+            input_graph(4, ex:a, 41) .
+            input_graph(4, ex:b, 42) .
+            input_graph(5, ex:a, 51) .
+         ",
+        "[
+            1, 11, 12
+            3, 31, UNDEF
+            4, 41, 42
+            5, 51, UNDEF
+        ]"
+    )
+}
+
+#[test]
+fn left_join_multi() -> Result<(), Error> {
+    assert_sparql_multi(
+        "
+            prefix ex: <https://example.com/>
+
+            SELECT ?x ?y ?a ?b
+            WHERE
+            {
+                VALUES (?x ?y ?a) {
+                    (1 2 3) (1 2 3)
+                    (1 3 5)
+                    (1 UNDEF 6)
+                    (2 3 UNDEF) (2 3 UNDEF) (2 3 UNDEF)
+                }
+                OPTIONAL { VALUES (?x ?y ?b) {
+                    (1 2 4) (1 2 4) (1 2 4) (2 3 UNDEF) (2 3 UNDEF)
+                } } .
+            }
+        ",
+        "",
+        "[
+            1, 2, 3, 4; 1, 2, 3, 4; 1, 2, 3, 4; 1, 2, 3, 4; 1, 2, 3, 4; 1, 2, 3, 4
+            1, 3, 5, UNDEF
+            1, 2, 6, 4; 1, 2, 6, 4; 1, 2, 6, 4
+            2, 3, UNDEF, UNDEF; 2, 3, UNDEF, UNDEF; 2, 3, UNDEF, UNDEF; 2, 3, UNDEF, UNDEF; 2, 3, UNDEF, UNDEF; 2, 3, UNDEF, UNDEF
+        ]"
+    )
+}
+
+#[test]
+fn left_join_filter_multi() -> Result<(), Error> {
+    assert_sparql_multi(
+        "
+            prefix ex: <https://example.com/>
+
+            SELECT ?x ?y ?a ?b
+            WHERE
+            {
+                VALUES (?x ?y ?a) {
+                    (1 2 3)
+                    (1 3 1)
+                    (1 4 0)
+                }
+                OPTIONAL {
+                    VALUES (?x ?y ?b) {
+                        (1 2 4)
+                        (1 3 0)
+                        (1 4 ex:error_on_compare)
+                    }
+                    FILTER(?a < ?b)
+                } .
+            }
+        ",
+        "",
+        "[
+            1, 2, 3, 4
+            1, 3, 1, UNDEF
+            1, 4, 0, UNDEF
+        ]"
+    )
+}
+
+#[test]
+fn left_join_positive_exists_multi() -> Result<(), Error> {
+    let sparql = "
+        prefix ex: <https://example.com/>
+
+        SELECT ?x ?a ?b
+        WHERE
+        {
+            ?x ex:a ?a .
+            OPTIONAL {
+                ?x ex:b ?b .
+                FILTER EXISTS { ?a ex:x ?b . }
+            } .
+        }
+        ";
+    assert_sparql_multi(
+        sparql,
+        "
+            @prefix ex: <https://example.com/> .
+
+            input_graph(11, ex:x, 12) .
+            input_graph(1, ex:a, 11) .
+            input_graph(1, ex:b, 12) .
+            input_graph(2, ex:other, 21) .
+            input_graph(3, ex:a, 31) .
+            input_graph(4, ex:a, 41) .
+            input_graph(4, ex:b, 42) .
+            input_graph(5, ex:a, 51) .
+        ",
+        "[
+            1, 11, 12
+            3, 31, UNDEF
+            4, 41, UNDEF
+            5, 51, UNDEF
+        ]"
     )
 }
 
@@ -1843,6 +2102,99 @@ fn union_unbound() -> Result<(), Error> {
             input_graph(5, ex:q, ex:o) .
          ",
         "1, 11; 2, UNDEF; 4, 44; 5, UNDEF"
+    )
+}
+
+#[test]
+fn union_multi() -> Result<(), Error> {
+    assert_sparql_multi(
+        "
+            prefix ex: <https://example.com/>
+
+            SELECT ?x ?y ?a ?b
+            WHERE
+            {
+                { VALUES (?x ?y ?a) {
+                    (1 2 3)
+                    (1 2 UNDEF)
+                    (1 UNDEF UNDEF)
+                    (UNDEF UNDEF UNDEF)
+                } }
+                UNION
+                { VALUES (?x ?y ?b) {
+                    (1 2 3)
+                    (1 2 3)
+                    (1 2 UNDEF)
+                    (1 2 UNDEF)
+                    (1 UNDEF UNDEF)
+                    (UNDEF 2 UNDEF)
+                    (UNDEF UNDEF UNDEF)
+                } }
+            }
+        ",
+        "",
+        "[
+            1, 2, 3, UNDEF
+            UNDEF, 2, UNDEF, UNDEF
+
+            1, 2, UNDEF, 3
+            1, 2, UNDEF, 3
+            1, UNDEF, UNDEF, UNDEF
+            1, UNDEF, UNDEF, UNDEF
+            UNDEF, UNDEF, UNDEF, UNDEF
+            UNDEF, UNDEF, UNDEF, UNDEF
+
+            1, 2, UNDEF, UNDEF
+            1, 2, UNDEF, UNDEF
+            1, 2, UNDEF, UNDEF
+        ]"
+    )
+}
+
+
+
+#[test]
+fn union_seq() -> Result<(), Error> {
+    assert_sparql(
+        "
+            prefix ex: <https://example.com/>
+
+            SELECT ?x ?y ?a ?b
+            WHERE
+            {
+                { VALUES (?x ?y ?a) {
+                    (1 2 3)
+                    (1 2 UNDEF)
+                    (1 UNDEF UNDEF)
+                    (UNDEF UNDEF UNDEF)
+                } }
+                UNION
+                { VALUES (?x ?y ?b) {
+                    (1 2 3)
+                    (1 2 3)
+                    (1 2 UNDEF)
+                    (1 2 UNDEF)
+                    (1 UNDEF UNDEF)
+                    (UNDEF 2 UNDEF)
+                    (UNDEF UNDEF UNDEF)
+                } }
+            }
+        ",
+        "",
+        "[
+            1, 2, 3, UNDEF
+            1, 2, UNDEF, UNDEF
+            1, UNDEF, UNDEF, UNDEF
+            UNDEF, UNDEF, UNDEF, UNDEF
+
+            1, 2, UNDEF, 3
+            1, 2, UNDEF, 3
+            1, 2, UNDEF, UNDEF
+            1, 2, UNDEF, UNDEF
+            1, UNDEF, UNDEF, UNDEF
+            UNDEF, 2, UNDEF, UNDEF
+            UNDEF, UNDEF, UNDEF, UNDEF
+        ]"
     )
 }
 
