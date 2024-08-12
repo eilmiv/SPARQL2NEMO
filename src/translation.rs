@@ -1279,6 +1279,11 @@ impl QueryTranslator {
         Ok(projection)
     }
 
+    /// info:
+    /// - set impl based on seq impl + conversion to set; question whether to use slice as input
+    ///     - implementation complete enough
+    ///     - would preserve order by
+    ///     - stratified limitations in sequence unavoidable
     fn translate_slice_seq(&mut self, inner: &SolutionSequence, start: usize, length: Option<usize>) -> SolutionSequence {
         let index = nemo_var!(index);
         let mut condition = nemo_condition!(index, " >= ", start);
@@ -1289,8 +1294,7 @@ impl QueryTranslator {
         slice
     }
 
-    fn translate_slice(&mut self, inner: &SolutionSet, start: usize, length: Option<usize>) -> SolutionSet {
-        let inner_sequence = self.get_sequence(inner);
+    fn translate_slice(&mut self, inner_sequence: &SolutionSequence, start: usize, length: Option<usize>) -> SolutionSet {
         let slice_sequence = self.translate_slice_seq(&inner_sequence, start, length);
         nemo_def!(slice_set(??vars) :- slice_sequence(@index: ?i; ??vars); SolutionSet);
         slice_set
@@ -1420,6 +1424,7 @@ impl QueryTranslator {
 
     /// notes
     /// - Handle non overlapping domain for Minus
+    /// - Standard requires Distinct and Reduced to "preserve any order given by OrderBy"
     fn translate_pattern(&mut self, pattern: &GraphPattern) -> Result<SolutionSet, TranslateError> {
         match pattern {
             GraphPattern::Bgp {patterns} => self.translate_bgp(patterns),
@@ -1484,7 +1489,7 @@ impl QueryTranslator {
                 self.translate_pattern(inner)
             }
             GraphPattern::Slice {inner, start, length} => {
-                let inner_solution = self.translate_pattern(inner)?;
+                let inner_solution = self.translate_pattern_seq(inner)?;
                 Ok(self.translate_slice(&inner_solution, *start, *length))
             }
             GraphPattern::Group {inner, variables, aggregates} => {
@@ -1695,6 +1700,7 @@ impl QueryTranslator {
     /// - handle from (dataset) and base_iri
     /// - ASK, CONSTRUCT and DESCRIBE can use distinct always
     /// - Check that limit + order by works for construct and describe
+    /// - maybe add parameter to select between set, multiset and sequence semantic (or different function)
     fn translate_query(&mut self, query: &Query) -> Result<Box<dyn TypedPredicate>, TranslateError> {
         match query {
             Query::Select {
@@ -1707,7 +1713,7 @@ impl QueryTranslator {
                 dataset: _,
                 base_iri: _
             } if Self::is_distinct(inner) => {
-                let inner_sequence = self.translate_pattern(inner)?;
+                let inner_sequence = self.translate_pattern_seq(inner)?;
                 Ok(Box::new(self.translate_slice(&inner_sequence, *start, *length)))
             }
             Query::Select {pattern, dataset: _, base_iri: _} => Ok(Box::new(self.translate_pattern_seq(pattern)?)),
