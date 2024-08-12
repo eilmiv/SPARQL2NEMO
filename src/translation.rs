@@ -332,7 +332,7 @@ impl QueryTranslator {
     fn translate_binary_operator(&mut self, l: Binding, r: Binding, result: Binding, left_solution: &SolutionExpression, right_solution: &SolutionExpression, binding: &dyn TypedPredicate) -> Result<SolutionExpression, TranslateError>{
         nemo_def!(
             op(??vars, ??left, ??right; @result: result) :-
-                binding(??var, ??left, ??right, ??other),
+                binding(??vars, ??left, ??right, ??other),
                 left_solution(??vars, ??left; @result: l),
                 right_solution(??vars, ??right; @result: r)
                 ; SolutionExpression
@@ -1173,16 +1173,51 @@ impl QueryTranslator {
         Ok(union)
     }
 
-    /// notes
+    /// info
     /// - Test what others do when binding to an already existing variable
-    /// - optimize for known functions that do not error
-    /// info:
-    /// - old implementation with null as unbound using existential rule did not require negation
-    fn translate_extend(&mut self, inner: &SolutionSet, var: &Variable, expression: &SolutionExpression) -> Result<SolutionSet, TranslateError> {
+    ///     - Virtuoso ignores binding
+    ///     - Blazegraph matches against binding
+    ///     - rdflib overwrites binding
+    ///     - spargebra: error
+    ///     - undefined in SPARQL
+    /// - old implementation with null as unbound using existential rule eliminates negation
+    ///     - this means there is no need to track errors to eliminate negation in some cases
+    ///         - hypothesis: negation can be eliminated if a predicate depends both possitively and negatively on some other predicate
+    ///             - probably false (maybe also requires the rules to only differ by the negated part)
+    ///                 - actually true, in fact any negation that does not lead to non-monotonic results can be replaced by existential rules
+    ///     - similar to left join
+    fn translate_extend_g<T: TypedPredicate>(&mut self, inner: &T, var: &Variable, expression: &SolutionExpression) -> Result<T, TranslateError> {
+        // create dummy dependency
+        let dummy_dependency = SolutionSet::create("dummy_dependency", vec![]);
+        nemo_add!(dummy_dependency());
+        nemo_add!(dummy_dependency(nemo_terms![]) :- {expression});
+
+        // bound using existential rule
         let bound_var = self.sparql_vars.get(var);
         let unbound = self.undefined_val.clone();
-        nemo_def!(extend(??e_vars, ??base_vars, bound_var) :- inner(??e_vars, ??base_vars), expression(??e_vars; @result: bound_var); SolutionSet);
-        nemo_add!(extend(??e_vars, ??base_vars, ?unbound) :- inner(??e_vars, ??base_vars), ~expression(??e_vars; @result: bound_var), unbound(?unbound));
+        nemo_def!(
+            proto_extend(@?count: ?c, @?index: ?i; ??e_vars, ??base_vars, bound_var, nemo_iri!(no_error)) :-
+                inner(@?count: ?c, @?index: ?i; ??e_vars, ??base_vars),
+                expression(??e_vars; @result: bound_var)
+                {&dummy_dependency}
+                ; T
+        );
+        nemo_add!(
+            proto_extend(@?count: ?c, @?index: ?i; ??e_vars, ??base_vars, nemo_var!(!no_result), nemo_var!(!error)) :-
+                inner(@?count: ?c, @?index: ?i; ??e_vars, ??base_vars)
+                {&dummy_dependency}
+        );
+
+        // translate null to undef, carry over index/count
+        nemo_def!(extend(@?count: ?c, @?index: ?i; ??all_vars) :-
+            proto_extend(@?count: ?c, @?index: ?i; ??all_vars, nemo_iri!(no_error))
+            ; T
+        );
+        nemo_add!(extend(@?count: ?c, @?index: ?i; ??all_vars_without_result, ?undef) :-
+            proto_extend(@?count: ?c, @?index: ?i; ??all_vars_without_result, ?result, ?null),
+            unbound(?undef),
+            {nemo_condition!(?null, " != ", nemo_iri!(no_error))}
+        );
         Ok(extend)
     }
 
@@ -1405,7 +1440,7 @@ impl QueryTranslator {
             GraphPattern::Extend{inner, variable, expression} => {
                 let inner_solution = self.translate_pattern(inner)?;
                 let expr_solution = self.translate_expression(expression, &inner_solution)?;
-                self.translate_extend(&inner_solution, variable, &expr_solution)
+                self.translate_extend_g(&inner_solution, variable, &expr_solution)
             }
             GraphPattern::Minus {left, right} => {
                 let left_solution = self.translate_pattern(left)?;
@@ -1484,7 +1519,11 @@ impl QueryTranslator {
                 let right_solution = self.translate_pattern_multi(right)?;
                 self.translate_union_multi(&left_solution, &right_solution)
             },
-            //GraphPattern::Extend {inner, variable, expression} => translate_extend_multi(state, inner, variable, expression),
+            GraphPattern::Extend {inner, variable, expression} => {
+                let inner_solution = self.translate_pattern_multi(inner)?;
+                let expr_solution = self.translate_expression(expression, &inner_solution)?;
+                self.translate_extend_g(&inner_solution, variable, &expr_solution)
+            },
             //GraphPattern::Minus {left, right} => translate_minus_multi(state, left, right),
             GraphPattern::Values {variables, bindings} => {
                 let value_seq = self.translate_values_seq(variables, bindings);
@@ -1525,7 +1564,11 @@ impl QueryTranslator {
                 let right_solution = self.translate_pattern_seq(right)?;
                 self.translate_union_seq(&left_solution, &right_solution)
             },
-            //GraphPattern::Extend {inner, variable, expression} => {},
+            GraphPattern::Extend {inner, variable, expression} => {
+                let inner_solution = self.translate_pattern_seq(inner)?;
+                let expr_solution = self.translate_expression(expression, &inner_solution)?;
+                self.translate_extend_g(&inner_solution, variable, &expr_solution)
+            },
             //Minus
             GraphPattern::Values {variables, bindings} => {
                 Ok(self.translate_values_seq(variables, bindings))

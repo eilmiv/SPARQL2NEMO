@@ -18,9 +18,9 @@ fn _test_parsing() {
     let query_str = "
         prefix s: <https://xxx#>
 
-        SELECT ?c
-        WHERE {
-            s:a s:b [ s:x* s:y ] .
+        select ?a ?b  where {
+            VALUES (?a ?b) {(1 2)}
+            BIND(?a + 1 as ?b)
         }
     ";
     let query = Query::parse(query_str, None).unwrap();
@@ -146,5 +146,5 @@ fn _test_model(){
 
 
 fn main() {
-    _test_parsing();
+    _test_translation();
 }

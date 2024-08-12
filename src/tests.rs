@@ -2223,7 +2223,6 @@ fn bind() -> Result<(), Error> {
 
 #[test]
 fn bind_with_expression_error() -> Result<(), Error> {
-    // this is not correct sparql behaviour yet
     assert_sparql(
         "
             prefix ex: <https://example.com/>
@@ -2242,6 +2241,78 @@ fn bind_with_expression_error() -> Result<(), Error> {
             input_graph(2, ex:p, ex:nan) .
          ",
         "1, 5; 2, UNDEF"
+    )
+}
+
+#[test]
+fn bind_seq() -> Result<(), Error> {
+    assert_sparql(
+        "
+            prefix ex: <https://example.com/>
+
+            SELECT ?a ?y
+            WHERE
+            {
+                ?a ex:p ?x .
+                BIND(?x + ?x + ?x + ?x - ?a as ?y)
+            }
+        ",
+        "
+            @prefix ex: <https://example.com/> .
+
+            input_graph(1, ex:p, 5) .
+            input_graph(2, ex:p, 6) .
+         ",
+        "[1, 19; 2, 22]"
+    )
+}
+
+#[test]
+fn bind_seq_with_expression_error() -> Result<(), Error> {
+    assert_sparql(
+        "
+            prefix ex: <https://example.com/>
+
+            SELECT ?a ?y
+            WHERE
+            {
+                ?a ex:p ?x .
+                BIND(?x + ?x + ?x + ?x - ?a as ?y)
+            }
+        ",
+        "
+            @prefix ex: <https://example.com/> .
+
+            input_graph(1, ex:p, 5) .
+            input_graph(2, ex:p, ex:nan) .
+         ",
+        "[1, 19; 2, UNDEF]"
+    )
+}
+
+#[test]
+fn bind_multi_with_expression_error() -> Result<(), Error> {
+    assert_sparql(
+        "
+            prefix ex: <https://example.com/>
+
+            SELECT ?a ?y
+            WHERE
+            {
+                {
+                    ?a ex:p ?x .
+                    BIND(?x + ?x + ?x + ?x - ?a as ?y)
+                }
+                VALUES (?a) { (1) (2) }
+            }
+        ",
+        "
+            @prefix ex: <https://example.com/> .
+
+            input_graph(1, ex:p, 5) .
+            input_graph(2, ex:p, ex:nan) .
+         ",
+        "[1, 19; 2, UNDEF]"
     )
 }
 

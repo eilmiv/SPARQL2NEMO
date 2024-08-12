@@ -1742,7 +1742,9 @@ impl RuleBuilder {
                             for (key, value) in set_index.iter() {
                                 available.push_str(&format!("{}: {:#b}\n", value, key));
                             }
-                            panic!("var {var} in {} could not be bound to any var set; predicates: {} \nflags: {:#b} \navailable: \n{}\n", predicate.label(), predicates.join(", "), flags, available)
+                            #[allow(unused_variables)]
+                            let predicate_vars = predicate.vars().iter().map(|v| v.label()).collect::<Vec<_>>().join(", ");
+                            panic!("var {var} in {}({predicate_vars}) could not be bound to any var set; predicates: {} \nflags: {:#b} \navailable: \n{}\n", predicate.label(), predicates.join(", "), flags, available)
                         }
                     }
                     // ensure also empty variable sets exist (var sets that don't exist raise error when resolving head)
