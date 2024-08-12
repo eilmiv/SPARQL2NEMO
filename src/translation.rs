@@ -1256,11 +1256,26 @@ impl QueryTranslator {
         values
     }
 
-    /// notes
-    /// - this is wrong for multi sets, you might have to combine things that become the same after projection
-    /// - handle projected variables that do not occur in body (map to UNDEF)
+    /// info
+    /// - you might have to combine things that become the same after projection -> special multi implementation
+    /// - handles projected variables that do not occur in body (map to UNDEF)
     fn translate_project_g<T: TypedPredicate>(&mut self, inner: &T, variables: &Vec<Variable>) -> Result<T, TranslateError> {
-        nemo_def!(projection(@?count: ?c, @?index: ?i; nemo_terms!(variables => self.translate_var_func())) :- inner(@?count: ?x, @?index: ?i; ??all_vars); T);
+        let initial_var = if get_vars(inner).len() == inner.inner_vars().len() {
+            nemo_terms![]
+        } else {
+            nemo_terms![nemo_var!(index_or_count)]
+        };
+        let projection = T::create("projection", nemo_terms!(initial_var.clone(), variables => self.translate_var_func()).vars());
+        let extended_inner = if projection.inner_vars().iter().all(|v| get_vars(inner).contains(&v)) {
+            inner.clone()
+        } else {
+            let proto_projection = T::create("proto_projection",  nemo_terms!(initial_var, projection.inner_vars()).vars());
+            let (unbound, bindings) = self.map_unbound(&proto_projection, inner);
+            nemo_add!(proto_projection(@?count: ?c, @?index: ?i; bindings) :- inner(@?count: ?c, @?index: ?i; ??vars), {&unbound});
+            proto_projection
+        };
+
+        nemo_add!(projection(@?count: %sum(?c, ??other), @?index: ?i; ??projected) :- extended_inner(@?count: ?c, @?index: ?i; ??projected, ??other));
         Ok(projection)
     }
 

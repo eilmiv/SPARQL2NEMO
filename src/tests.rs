@@ -2374,6 +2374,95 @@ fn values() -> Result<(), Error> {
 }
 
 #[test]
+fn project() -> Result<(), Error> {
+    assert_sparql(
+        "
+            SELECT DISTINCT ?a ?c
+            WHERE
+            {
+                VALUES (?a ?b ?c) {
+                    (1 1 1)
+                    (1 2 1)
+                    (1 3 2)
+                    (1 4 UNDEF)
+                }
+            }
+        ",
+        "",
+        "1, 1; 1, 2; 1, UNDEF"
+    )
+}
+
+#[test]
+fn project_seq() -> Result<(), Error> {
+    assert_sparql(
+        "
+            SELECT ?a ?c
+            WHERE
+            {
+                VALUES (?a ?b ?c) {
+                    (1 1 1)
+                    (1 3 2)
+                    (1 2 1)
+                    (1 4 UNDEF)
+                }
+            }
+        ",
+        "",
+        "[1, 1; 1, 2; 1, 1; 1, UNDEF]"
+    )
+}
+
+
+#[test]
+fn project_multi() -> Result<(), Error> {
+    assert_sparql(
+        "
+            SELECT ?a ?c
+            WHERE
+            {
+                VALUES (?a) { (1) }
+                VALUES (?a ?b ?c) {
+                    (1 1 1)
+                    (1 3 2)
+                    (1 2 1)
+                    (1 4 UNDEF)
+                }
+            }
+        ",
+        "",
+        "[1, 1; 1, 1; 1, 2; 1, UNDEF]"
+    )
+}
+
+
+#[test]
+fn project_undef() -> Result<(), Error> {
+    assert_sparql(
+        "
+            SELECT ?x ?a ?c ?y
+            WHERE
+            {
+                VALUES (?a) { (1) }
+                VALUES (?a ?b ?c) {
+                    (1 1 1)
+                    (1 3 2)
+                    (1 2 1)
+                    (1 4 UNDEF)
+                }
+            }
+        ",
+        "",
+        "[
+            UNDEF, 1, 1, UNDEF
+            UNDEF, 1, 1, UNDEF
+            UNDEF, 1, 2, UNDEF
+            UNDEF, 1, UNDEF, UNDEF
+        ]"
+    )
+}
+
+#[test]
 fn order_by_irrelevant() -> Result<(), Error> {
     // order by has no effect in this example
     assert_sparql(
