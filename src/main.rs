@@ -19,9 +19,10 @@ fn _test_parsing() {
         prefix s: <https://xxx#>
 
         select ?a ?b  where {
-            VALUES (?a ?b) {(1 2)}
-            BIND(?a + 1 as ?b)
+            VALUES (?a ?b) {(1 2) (2 1)}
         }
+        ORDER BY ?b
+
     ";
     let query = Query::parse(query_str, None).unwrap();
 
@@ -81,14 +82,12 @@ fn _test_rust(){
 
 fn _test_translation(){
     let query_str = "
-        prefix ex: <https://example.com/>
+        prefix s: <https://xxx#>
 
-        SELECT DISTINCT ?a ?b ?d
-        WHERE
-        {
-          ?a ?b ?c .
-          BIND(?c in (1, 2, 3) as ?d)
+        select ?a ?b  where {
+            VALUES (?a ?b) {(1 2) (2 1)}
         }
+        ORDER BY ?b
     ";
 
     println!("translating query:");

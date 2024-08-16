@@ -2694,6 +2694,48 @@ fn order_by() -> Result<(), Error> {
     )
 }
 
+
+#[test]
+fn order_by_multi_type() -> Result<(), Error> {
+    assert_sparql(
+        "
+            prefix ex: <https://example.com/>
+
+            SELECT ?a ?b
+            WHERE
+            {
+                VALUES (?a ?b) {
+                    (\"q\" 0)
+                    (\"o\" 4)
+                    (\"q\" 0)
+
+                    (1 \"abc\")
+                    (\"o\" \"xyz\")
+                    (1 \"abc\")
+
+                    (0 0.3)
+                    (0 4.3)
+                    (1 0.3)
+                }
+            }
+            ORDER BY DESC(-?b) ?a
+        ",
+        "",
+        "[
+            0, \"o\"
+            0, \"q\"
+            0.3, -2
+            0.3, -1
+            4, \"o\"
+            4.3, 10000
+            \"abc\", 1
+            \"abc\", 1
+            \"xyz\", \"o\"
+        ]"
+    )
+}
+
+
 #[test]
 fn describe() -> Result<(), Error> {
     assert_sparql(

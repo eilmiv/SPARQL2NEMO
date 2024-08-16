@@ -77,10 +77,17 @@ impl VariableTranslator {
     }
 }
 
+enum SortAlg {
+    Future,
+    Fast,
+    Normal,
+}
+
 struct QueryTranslator {
     sparql_vars: VariableTranslator,
     input_graph: PredicatePtr,
     undefined_val: SolutionExpression,
+    sort_using: SortAlg,
 }
 
 impl QueryTranslator {
@@ -96,7 +103,7 @@ impl QueryTranslator {
         };
         undefined_val.mark_nullable();
 
-        QueryTranslator{sparql_vars: VariableTranslator::new(), input_graph, undefined_val}
+        QueryTranslator{sparql_vars: VariableTranslator::new(), input_graph, undefined_val, sort_using: SortAlg::Normal}
     }
 
     fn triple_set(&self) -> SolutionSet {
@@ -1354,6 +1361,24 @@ impl QueryTranslator {
         Ok(collect_aggregations)
     }
 
+    /// info:
+    /// - special number and string sorting not required by standard
+    fn translate_type_score(&mut self, input: &dyn TypedPredicate, vars: Vec<VarPtr>) -> SolutionExpression {
+        let to_score = SolutionSet::create("to_score", vec![VarPtr::new("input")]);
+        for v in vars {
+            nemo_add!(to_score(v) :- {input});
+        }
+        let undef = self.undefined_val.clone();
+        let v = nemo_var!(v);
+        let bnode = 4 * nemo_call!(INT; nemo_call!(isNull; v));
+        let iri = 3 * nemo_call!(INT; nemo_call!(isIri; v));
+        let number = 2 * nemo_call!(INT; nemo_call!(isNumeric; v));
+        let string = 4 * nemo_call!(INT; nemo_call!(isString; v));
+        nemo_def!(type_score(v, 0 - bnode - iri - number - string ) :- to_score(v), ~undef(v); SolutionExpression);
+        nemo_add!(type_score(?undef, -5) :- undef(?undef));
+        type_score
+    }
+
     /// a stable sort
     /// notes
     /// - Undefined sorted first
@@ -1361,21 +1386,36 @@ impl QueryTranslator {
     /// - implement fast hacker sort for benchmarking
     fn translate_sort(&mut self, inner: &SolutionSequence, order_expression: &OrderExpression) -> Result<SolutionSequence, TranslateError> {
         let val = nemo_var!(sort_val);
+        let x = nemo_var!(x);
         let other_val = nemo_var!(other_sort_val);
         let index = nemo_var!(index);
         let other_index = nemo_var!(other_index);
+        let type_index = nemo_var!(type_index);
+        let min = nemo_var!(min);
         let (filter, expression) = match order_expression {
             OrderExpression::Asc(e) => (nemo_condition!(other_val, " <= ", val), e),
             OrderExpression::Desc(e) => (nemo_condition!(other_val, " >= ", val), e),
         };
+        let index_filter = nemo_condition!(other_index, " >= ", index);
 
+        let undef = self.undefined_val.clone();
         let expression_solution = self.translate_expression(expression, inner)?;
         nemo_def!(sort_condition(?i, ??both, ??depend; @result: ?r) :- inner(@index: ?i; ??both, ??depend), expression_solution(??depend; @result: ?r); SolutionExpression);
-        nemo_def!(sorted_proto(@index: %count(other_index); ??vars) :- sort_condition(?i, ??vars; @result: val), sort_condition(other_index, ??*other_vars; @result: other_val), {filter}; SolutionSequence);
-
-        let index_filter = nemo_condition!(other_index, " >= ", index);
-        nemo_def!(sorted_ties(@index: %count(other_index); ??vars) :- sort_condition(index, ??vars; @result: ?r), sort_condition(other_index, ??*other_vars; @result: ?r), {index_filter}; SolutionSequence);
-        nemo_def!(sorted(@index: index.clone() - other_index.clone(); ??vars) :- sorted_proto(@index: index; ??vars), sorted_ties(@index: other_index; ??vars); SolutionSequence);
+        nemo_add!(sort_condition(?i, ??both, ??depend; @result: ?undef) :- inner(@index: ?i; ??both, ??depend), undef(?undef), ~expression_solution(??depend; @result: ?r));
+        let type_map = self.translate_type_score(&sort_condition, vec![sort_condition.result_var()]);
+        nemo_def!(to_sort(?i, ??other_vars, ?type_id; @result: ?r) :- sort_condition(?i, ??other_vars; @result: ?r), type_map(?r, ?type_id); SolutionExpression);
+        nemo_def!(sorted_type(@index: %count(other_index); ??vars) :- to_sort(?i, ??vars, val, ?r), to_sort(other_index, ??*other_vars, other_val, x), {&filter}; SolutionSequence);
+        nemo_def!(sorted_vals(@index: %count(other_index); ??vars) :- to_sort(?i, ??vars, ?t, val), to_sort(other_index, ??*other_vars, ?t, other_val), {filter}; SolutionSequence);
+        nemo_def!(sorted_ties(@index: %count(other_index); ??vars) :- to_sort(index, ??vars, ?t, ?r), to_sort(other_index, ??*other_vars, ?t, ?r), {index_filter}; SolutionSequence);
+        nemo_def!(min_type(%min(?i)) :- sorted_type(@index: ?i; ??vars); SolutionSet);
+        nemo_def!(
+            sorted(@index: index.clone() - other_index.clone() + type_index.clone() - min.clone(); ??vars) :-
+                sorted_type(@index: type_index; ??vars),
+                sorted_vals(@index: index; ??vars),
+                sorted_ties(@index: other_index; ??vars),
+                min_type(min)
+                ; SolutionSequence
+        );
         Ok(sorted)
     }
 

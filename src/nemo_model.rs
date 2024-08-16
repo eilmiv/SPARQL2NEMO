@@ -1436,6 +1436,16 @@ impl From<Vec<ProtoPredicate>> for ProtoPredicate {
     }
 }
 
+impl From<&ProtoPredicate> for ProtoPredicate {
+    fn from(value: &ProtoPredicate) -> Self{
+        match value {
+            ProtoPredicate::Explicit(p, b, n) => ProtoPredicate::Explicit(p.clone(), b.clone(), *n),
+            ProtoPredicate::Special(prefix, other) => ProtoPredicate::Special(prefix.clone(), other.clone()),
+            ProtoPredicate::Multi(childs) => ProtoPredicate::Multi(childs.iter().map(ProtoPredicate::from).collect())
+        }
+    }
+}
+
 macro_rules! nemo_atoms {
     ($($atom:expr),*) => {crate::nemo_model::ProtoPredicate::Multi(vec![
         $(crate::nemo_model::ProtoPredicate::from($atom)),*
