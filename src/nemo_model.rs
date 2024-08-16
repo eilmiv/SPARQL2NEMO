@@ -579,6 +579,8 @@ macro_rules! nemo_condition {
 pub struct Rule {
     /// bindings in predicate that has this rule as definition
     bindings: Vec<Binding>,
+    /// a rule can have two heads
+    second_bindings: Option<Vec<Binding>>,
     /// rule body
     body: Vec<BoundPredicate>,
     /// filters
@@ -587,7 +589,7 @@ pub struct Rule {
 
 impl Rule {
     pub fn new(bindings: Vec<Binding>, body: Vec<BoundPredicate>, filters: Vec<SpecialPredicate>) -> Rule{
-        Rule{bindings, body, filters}
+        Rule{bindings, body, filters, second_bindings: None}
     }
 
     fn matches(&self, predicate: &Predicate) -> bool {
@@ -617,7 +619,16 @@ impl Rule {
             .map(|a| a.nemo_string(&mut var_names))
             .collect::<Vec<_>>()
             .join(", ");
-        let mut result = format!("{predicate_name}({head_inner}) :- {body}");
+        let mut result = match &self.second_bindings {
+            None => format!("{predicate_name}({head_inner}) :- {body}"),
+            Some(bindings) => {
+                let second_head_inner = make_non_empty(bindings.iter()
+                    .map(|b| b.nemo_string(&mut var_names))
+                    .collect::<Vec<_>>()
+                    .join(", "));
+                format!("{predicate_name}({head_inner}), {predicate_name}({second_head_inner}) :- {body}")
+            }
+        };
 
         if !filters.is_empty() {
             result.push_str(", ");
@@ -661,7 +672,8 @@ impl VariableTranslator {
         let label = variable.label();
 
         // handle invalid variable names
-        let mut label_to_use = format!("var_{label}");
+        let clean_label: String = label.chars().filter(|c| c.is_alphanumeric()).collect();
+        let mut label_to_use = format!("var_{clean_label}");
         if let Some(first_char) = label.chars().next() {
             if first_char.is_ascii_alphabetic() {
                 label_to_use = label;
@@ -769,6 +781,13 @@ impl Predicate {
         );
         let predicate_pos = self.positions.get_mut(pos).expect(&msg);
         predicate_pos.properties &= !property;
+    }
+
+    /// adds second head to last rule
+    pub fn set_second_head(&mut self, head: Vec<Binding>) {
+        let mut first_rule = self.rules.pop().expect("predicate must have a last rule");
+        first_rule.second_bindings = Some(head);
+        self.rules.push(first_rule);
     }
 }
 
@@ -890,7 +909,7 @@ impl PredicatePtr {
 
     /// This is based on [Predicate::property_at]
     /// Additional properties are recursively collected from all rules.
-    /// Note that only non-negated [explicit bindings](BoundPredicate) of [variables](Binding::Variable) are used to collect properties.
+    /// Note that only non-negated [explicit bindings](BoundPredicate) of [variables](Binding::Variable) and only the primary rule head are used to collect properties.
     /// The semantic of a property is that all bindings to a position must have the property.
     ///
     /// Example:
@@ -920,6 +939,11 @@ impl PredicatePtr {
     pub fn unset_property(&self, property: u32, pos: usize) {
         let mut p = self.ptr.borrow_mut();
         p.unset_property(property, pos);
+    }
+
+    pub fn set_second_head(&self, head: Vec<Binding>) {
+        let mut p = self.ptr.borrow_mut();
+        p.set_second_head(head);
     }
 
     /// Gets NEMO program for the predicate including dependencies
@@ -971,6 +995,11 @@ pub fn add_fact(p: &dyn TypedPredicate, fact: Fact){
 
 pub fn add_rule(p: &dyn TypedPredicate, rule: Rule){
     p.get_predicate().add_rule(rule)
+}
+
+/// adds second head to last rule
+pub fn set_second_head(p: &dyn TypedPredicate, head: Vec<Binding>){
+    p.get_predicate().set_second_head(head);
 }
 
 pub fn get_vars(p: &dyn TypedPredicate) -> Vec<VarPtr>{

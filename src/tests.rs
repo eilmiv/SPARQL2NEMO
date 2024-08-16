@@ -2705,7 +2705,7 @@ fn order_by_multi_type() -> Result<(), Error> {
             WHERE
             {
                 VALUES (?a ?b) {
-                    (\"q\" 0)
+                    (\"o\" 0)
                     (\"o\" 4)
                     (\"q\" 0)
 
@@ -2713,24 +2713,24 @@ fn order_by_multi_type() -> Result<(), Error> {
                     (\"o\" \"xyz\")
                     (1 \"abc\")
 
-                    (0 0.3)
-                    (0 4.3)
-                    (1 0.3)
+                    (-1 0.3e0)
+                    (10000 4.3e0)
+                    (-2 0.3e0)
                 }
             }
             ORDER BY DESC(-?b) ?a
         ",
         "",
         "[
-            0, \"o\"
-            0, \"q\"
-            0.3, -2
-            0.3, -1
-            4, \"o\"
-            4.3, 10000
-            \"abc\", 1
-            \"abc\", 1
-            \"xyz\", \"o\"
+            \"o\", \"xyz\"
+            1, \"abc\"
+            1, \"abc\"
+            \"o\", 0
+            \"q\", 0
+            -2, \"0.3\"^^<http://www.w3.org/2001/XMLSchema#double>
+            -1, \"0.3\"^^<http://www.w3.org/2001/XMLSchema#double>
+            \"o\", 4
+            10000, \"4.3\"^^<http://www.w3.org/2001/XMLSchema#double>
         ]"
     )
 }

@@ -5,7 +5,7 @@ use spargebra::Query;
 use spargebra::term::{BlankNode, GroundTerm, Literal, NamedNode, NamedNodePattern, TermPattern, TriplePattern, Variable};
 use crate::error::TranslateError;
 use crate::error::TranslateError::{AggregationNotImplemented, MultiPatternNotImplemented, PatternNotImplemented, SequencePatternNotImplemented};
-use crate::nemo_model::{add_rule, Binding, BoundPredicate, Call, construct_program, get_vars, has_prop_for_var, hash_dedup, nemo_add, nemo_atoms, nemo_call, nemo_condition, nemo_def, nemo_filter, nemo_iri, nemo_predicate_type, nemo_terms, nemo_var, PredicatePtr, ProtoPredicate, Rule, to_bound_predicate, to_negated_bound_predicate, TypedPredicate, var_posses, VarPtr};
+use crate::nemo_model::{add_rule, Binding, BoundPredicate, Call, construct_program, get_vars, has_prop_for_var, hash_dedup, nemo_add, nemo_atoms, nemo_call, nemo_condition, nemo_declare, nemo_def, nemo_filter, nemo_iri, nemo_predicate_type, nemo_terms, nemo_var, PredicatePtr, ProtoPredicate, Rule, set_second_head, to_bound_predicate, to_negated_bound_predicate, TypedPredicate, var_posses, VarPtr};
 
 nemo_predicate_type!(SolutionSet = ...);
 nemo_predicate_type!(SolutionMultiSet = count ...);
@@ -77,17 +77,10 @@ impl VariableTranslator {
     }
 }
 
-enum SortAlg {
-    Future,
-    Fast,
-    Normal,
-}
-
 struct QueryTranslator {
     sparql_vars: VariableTranslator,
     input_graph: PredicatePtr,
     undefined_val: SolutionExpression,
-    sort_using: SortAlg,
 }
 
 impl QueryTranslator {
@@ -103,7 +96,7 @@ impl QueryTranslator {
         };
         undefined_val.mark_nullable();
 
-        QueryTranslator{sparql_vars: VariableTranslator::new(), input_graph, undefined_val, sort_using: SortAlg::Normal}
+        QueryTranslator{sparql_vars: VariableTranslator::new(), input_graph, undefined_val}
     }
 
     fn triple_set(&self) -> SolutionSet {
@@ -1363,7 +1356,7 @@ impl QueryTranslator {
 
     /// info:
     /// - special number and string sorting not required by standard
-    fn translate_type_score(&mut self, input: &dyn TypedPredicate, vars: Vec<VarPtr>) -> SolutionExpression {
+    fn type_score(&mut self, input: &dyn TypedPredicate, vars: Vec<VarPtr>) -> SolutionExpression {
         let to_score = SolutionSet::create("to_score", vec![VarPtr::new("input")]);
         for v in vars {
             nemo_add!(to_score(v) :- {input});
@@ -1379,52 +1372,155 @@ impl QueryTranslator {
         type_score
     }
 
-    /// a stable sort
-    /// notes
-    /// - Undefined sorted first
-    /// - sort assumes total order
-    /// - implement fast hacker sort for benchmarking
-    fn translate_sort(&mut self, inner: &SolutionSequence, order_expression: &OrderExpression) -> Result<SolutionSequence, TranslateError> {
-        let val = nemo_var!(sort_val);
-        let x = nemo_var!(x);
-        let other_val = nemo_var!(other_sort_val);
-        let index = nemo_var!(index);
-        let other_index = nemo_var!(other_index);
-        let type_index = nemo_var!(type_index);
-        let min = nemo_var!(min);
-        let (filter, expression) = match order_expression {
-            OrderExpression::Asc(e) => (nemo_condition!(other_val, " <= ", val), e),
-            OrderExpression::Desc(e) => (nemo_condition!(other_val, " >= ", val), e),
-        };
-        let index_filter = nemo_condition!(other_index, " >= ", index);
+    fn radix_sort(&mut self, input: SolutionSet) -> SolutionExpression {
+        let vi = VarPtr::new("i");
+        let vs = VarPtr::new("vs");
+        let s = nemo_var!(s);
+        let i = nemo_var!(i);
+        let child_i = nemo_var!(child_i);
+        let c = nemo_var!(c);
+        let start = nemo_var!(start);
+        let end = nemo_var!(end);
+        let mid = nemo_var!(mid);
+        let mid_str = nemo_var!(mid_str);
+        let child = nemo_var!(child);
+        let parent = nemo_var!(parent);
+        let other = nemo_var!(other);
 
-        let undef = self.undefined_val.clone();
-        let expression_solution = self.translate_expression(expression, inner)?;
-        nemo_def!(sort_condition(?i, ??both, ??depend; @result: ?r) :- inner(@index: ?i; ??both, ??depend), expression_solution(??depend; @result: ?r); SolutionExpression);
-        nemo_add!(sort_condition(?i, ??both, ??depend; @result: ?undef) :- inner(@index: ?i; ??both, ??depend), undef(?undef), ~expression_solution(??depend; @result: ?r));
-        let type_map = self.translate_type_score(&sort_condition, vec![sort_condition.result_var()]);
-        nemo_def!(to_sort(?i, ??other_vars, ?type_id; @result: ?r) :- sort_condition(?i, ??other_vars; @result: ?r), type_map(?r, ?type_id); SolutionExpression);
-        nemo_def!(sorted_type(@index: %count(other_index); ??vars) :- to_sort(?i, ??vars, val, ?r), to_sort(other_index, ??*other_vars, other_val, x), {&filter}; SolutionSequence);
-        nemo_def!(sorted_vals(@index: %count(other_index); ??vars) :- to_sort(?i, ??vars, ?t, val), to_sort(other_index, ??*other_vars, ?t, other_val), {filter}; SolutionSequence);
-        nemo_def!(sorted_ties(@index: %count(other_index); ??vars) :- to_sort(index, ??vars, ?t, ?r), to_sort(other_index, ??*other_vars, ?t, ?r), {index_filter}; SolutionSequence);
-        nemo_def!(min_type(%min(?i)) :- sorted_type(@index: ?i; ??vars); SolutionSet);
-        nemo_def!(
-            sorted(@index: index.clone() - other_index.clone() + type_index.clone() - min.clone(); ??vars) :-
-                sorted_type(@index: type_index; ??vars),
-                sorted_vals(@index: index; ??vars),
-                sorted_ties(@index: other_index; ??vars),
-                min_type(min)
-                ; SolutionSequence
+        nemo_def!(l(%max(nemo_call!(STRLEN; s))) :- input(s); SolutionSet);
+
+        nemo_def!(has_child("", 0, ?l, ?s) :- input(?s), l(?l); SolutionSet);
+        nemo_def!(multiple_children(?parent, ?start, ?end) :- has_child(?parent, ?start, ?end, ?a), has_child(?parent, ?start, ?end, ?b), {nemo_condition!(?a, " != ", ?b)}; SolutionSet);
+        nemo_def!(split(?parent, start, start.clone() + (end.clone() - start.clone()) / 2, end) :- multiple_children(?parent, start, end), {nemo_condition!(end.clone() - start.clone(), " >= ", 2)}; SolutionSet);
+        nemo_add!(
+            has_child(parent, start.clone(), mid.clone(), mid_str.clone()) :-
+                has_child(parent, start.clone(), end.clone(), child.clone()),
+                split(parent, start.clone(), mid.clone(), end.clone()),
+                {nemo_condition!(mid_str, " = ", nemo_call!(SUBSTRING; child, 1, nemo_call!(MIN; mid, nemo_call!(STRLEN; child))))}
         );
-        Ok(sorted)
+        set_second_head(&has_child, vec![mid_str, mid, end, child.clone()]);
+
+        nemo_def!(min_end(?parent, ?start, %min(?end)) :- has_child(?parent, ?start, ?end, ?child); SolutionSet);
+        nemo_def!(true_child(?parent, ?child) :- min_end(?parent, ?start, ?end), has_child(?parent, ?start, ?end, ?child), {nemo_condition!(?parent, " != ", ?child)}; SolutionSet);
+
+        nemo_def!(at(?s, ?s) :- input(?s); SolutionExpression); // expression separates second variable
+        nemo_add!(at(?parent, ?s) :- at(?child, ?s), true_child(?parent, ?child));
+        nemo_def!(count(?node, %count(?s)) :- at(?node, ?s); SolutionSet);
+
+        nemo_def!(child_index(parent, child, %count(other)) :- true_child(parent, child), true_child(parent, other), {nemo_condition!(nemo_call!(COMPARE; other, child), " <= ", 0)}; SolutionSet);
+
+        nemo_declare!(index(vi, vs));
+        nemo_add!(index(0, ""));
+        nemo_add!(index(?i, ?child) :- index(?i, ?parent), child_index(?parent, ?child, 1), ~input(?parent));
+        nemo_add!(index(i.clone() + 1, ?child) :- index(i, ?parent), child_index(?parent, ?child, 1), input(?parent));
+        nemo_add!(index(i.clone() + c.clone(), ?next) :- index(i, ?before), count(?before, c), child_index(?parent, ?before, child_i), child_index(?parent, ?next, child_i+1));
+
+        nemo_def!(sorted(?s; @result: ?i) :- index(?i, ?s), input(?s); SolutionExpression);
+        sorted
     }
 
+    /// info:
+    /// - trouble with decimal
+    /// - floating point limitations
+    /// - error is treated as unbound in my implementation and sorted first
+    /// - is COMPARE function correct?
     fn translate_order_by_seq(&mut self, inner: &SolutionSequence, expressions: &Vec<OrderExpression>) -> Result<SolutionSequence, TranslateError> {
-        let mut solution = inner.clone();
-        for expression in expressions.iter().rev() {
-            solution = self.translate_sort(&solution, expression)?;
+        let r = nemo_var!(r);
+        let n = nemo_var!(n);
+        let undef = self.undefined_val.clone();
+
+        // sort expressions
+        let sort_expressions: Vec<(SolutionExpression, bool)> = expressions.iter().map(
+            |e| {
+                let (expr_solution, reverse) = match e {
+                    OrderExpression::Asc(e) => (self.translate_expression(e, inner)?, false),
+                    OrderExpression::Desc(e) => (self.translate_expression(e, inner)?, true)
+                };
+                nemo_def!(sort_expression(??sort_depend; @result: ?r) :- expr_solution(??sort_depend; @result: ?r); SolutionExpression);
+                nemo_add!(sort_expression(??depend; @result: ?undef) :- inner(??other, ??depend), ~expr_solution(??depend; @result: ?r), undef(?undef));
+                Ok((sort_expression, reverse))
+            }
+        ).collect::<Result<Vec<(SolutionExpression, bool)>, TranslateError>>()?;
+
+        // strings to sorted numbers
+        let strings = SolutionSet::create("strings", vec![VarPtr::new("s")]);
+        for (expr, _negated) in &sort_expressions {
+            nemo_add!(strings(nemo_call!(STR; r.clone())) :- expr(??vars; @result: r.clone()), {nemo_condition!(nemo_call!(isNumeric; r.clone()), " = ", false)});
         }
-        Ok(solution)
+        let sorted_strings = self.radix_sort(strings);
+
+        // build sort table
+        nemo_def!(num(?s; @result: ?i) :- sorted_strings(?s; @result: ?i); SolutionExpression);
+        for (expr, _negated) in &sort_expressions {
+            nemo_add!(num(r; @result: r) :- expr(??vars; @result: r), {nemo_condition!(nemo_call!(isNumeric; r), " = ", true)});
+        }
+        nemo_add!(num(?undef; @result: 0) :- undef(?undef));
+        let type_score = self.type_score(&num, num.depend_vars());
+        let mut head: Vec<Binding> = Vec::new();
+        let mut body = nemo_atoms![];
+        for (expr, negated) in &sort_expressions {
+            let type_var = nemo_var!(t);
+            let num_var = nemo_var!(n);
+            head.push(type_var.clone());
+            head.push(if *negated {0 - num_var.clone()} else {num_var.clone()});
+            let num_binding = BoundPredicate::new(num.get_predicate(), vec![Binding::from(expr.result_var()), num_var], false);
+            let type_binding = BoundPredicate::new(type_score.get_predicate(), vec![Binding::from(expr.result_var()), type_var], false);
+            body = nemo_atoms!(&body, expr, &num_binding, &type_binding);
+        }
+        nemo_def!(sort_table(head, ?i) :- inner(@index: ?i; ??all_vars), {body}; SolutionSet);
+
+        // numbers to strings
+        let numbers = SolutionSet::create("n", vec![VarPtr::new("p"), VarPtr::new("n")]);
+        for (i, v) in get_vars(&sort_table).iter().enumerate() {
+            nemo_add!(numbers(i, v.clone()) :- sort_table(??all_vars));
+        }
+
+        nemo_def!(min_neg(?p; @result: %min(?n)) :- numbers(?p, ?n), {nemo_condition!(?n, " < ", 0)}; SolutionExpression);
+        nemo_def!(n_str(?p, nemo_call!(STR; r), r) :- numbers(?p, r), {nemo_condition!(r, " >= ", 0)}; SolutionSet);
+        let min = nemo_var!(min);
+        nemo_add!(n_str(?p, nemo_call!(STR; min.clone() - r.clone() - 1), r) :- min_neg(?p, min), numbers(?p, r), {nemo_condition!(r, " < ", 0)});
+
+        nemo_def!(len(?p, r, nemo_call!(STRLEN; nemo_call!(STRBEFORE; nemo_call!(CONCAT; r, "."), "."))) :- n_str(?p, r, n); SolutionSet);
+        nemo_def!(max_len(?p, %max(?l)) :- len(?p, ?s, ?l); SolutionSet);
+        nemo_def!(zeros(?p, ?n, "") :- max_len(?p, ?n); SolutionSet);
+        nemo_add!(zeros(?p, n.clone() - 1, nemo_call!(CONCAT; r, "0")) :- zeros(?p, n, r), {nemo_condition!(n, " > ", 0)});
+        nemo_def!(minus(?p, ?n, "") :- max_len(?p, ?n); SolutionSet);
+        nemo_add!(minus(?p, n.clone() - 1, nemo_call!(CONCAT; r, "-")) :- minus(?p, n, r), {nemo_condition!(n, " > ", 0)});
+
+        let prefix = nemo_var!(prefix);
+        nemo_def!(
+            sort_string_p(?p, nemo_call!(CONCAT; prefix, r), n) :-
+                n_str(?p, r, n),
+                len(?p, r, ?l),
+                zeros(?p, ?l, prefix),
+                {nemo_condition!(nemo_call!(STRSTARTS; r, "-"), " = ", false)}
+                ; SolutionSet
+        );
+        nemo_add!(
+            sort_string_p(?p, nemo_call!(CONCAT; prefix, r), n) :-
+                n_str(?p, r, n),
+                len(?p, r, ?l),
+                minus(?p, ?l, prefix),
+                {nemo_condition!(nemo_call!(STRSTARTS; r, "-"), " = ", true)}
+        );
+
+        let mut concat_bindings: Vec<Binding> = Vec::new();
+        let mut body = nemo_atoms![];
+        for (i, v) in get_vars(&sort_table).iter().enumerate() {
+            let str_var = nemo_var!(s);
+            if !concat_bindings.is_empty() { concat_bindings.push(Binding::from(" ")) }
+            let sort_string_binding = BoundPredicate::new(sort_string_p.get_predicate(), vec![Binding::from(i), str_var.clone(), Binding::from(v)], false);
+            concat_bindings.push(str_var);
+            body = nemo_atoms![body, &sort_string_binding];
+        }
+        let concat_call = Call::new("CONCAT", concat_bindings);
+        nemo_def!(sort_string(concat_call, ?i) :- sort_table(??sort_vars, ?i), {body}; SolutionSet);
+
+        // global sort
+        nemo_def!(number_strings(?s) :- sort_string(?s, ?i); SolutionSet);
+        let final_sort = self.radix_sort(number_strings);
+        nemo_def!(sorted(@index: ?id; ??original_vars) :- final_sort(?s, ?id), sort_string(?s, ?oi), inner(@index: ?oi; ??original_vars); SolutionSequence);
+        Ok(sorted)
     }
 
     fn get_multi(&mut self, inner: &SolutionSet) -> SolutionMultiSet {
