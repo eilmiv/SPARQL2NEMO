@@ -84,10 +84,9 @@ fn _test_translation(){
     let query_str = "
         prefix s: <https://xxx#>
 
-        select ?a ?b  where {
-            VALUES (?a ?b) {(1 2) (2 1)}
+        SELECT ?result {
+            BIND(bound(?a) as ?result)
         }
-        ORDER BY ?b
     ";
 
     println!("translating query:");

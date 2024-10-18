@@ -391,7 +391,16 @@ impl QueryTranslator {
             // it is important to add this rule only if nemo_var is not known to be defined because it marks it as possibly undefined
             nemo_add!(bound(nemo_var; @result: false) :- unbound(nemo_var), binding(??vars));
         }
-        Ok(bound)
+
+        let never_bound = SolutionExpression::create("never_bound", vec![VarPtr::new("result")]);
+        nemo_add!(never_bound(false));
+
+        if get_vars(binding).contains(&nemo_var) {
+            Ok(bound)
+        }
+        else {
+            Ok(never_bound)
+        }
     }
 
     /// info:
