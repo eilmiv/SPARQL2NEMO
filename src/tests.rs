@@ -1170,13 +1170,14 @@ fn bound() -> Result<(), Error> {
         "
             prefix ex: <https://example.com/>
 
-            SELECT DISTINCT ?x ?y ?err ?x_bound ?un_bound
+            SELECT DISTINCT ?x ?y ?err ?x_bound ?un_bound ?never_bound
             WHERE
             {
                 ?x ex:p ?y .
                 BIND(?x / ?y as ?err)
                 BIND(bound(?x) as ?x_bound)
                 BIND(bound(?err) as ?un_bound)
+                BIND(bound(?never) as ?never_bound)
             }
         ",
         "
@@ -1184,7 +1185,7 @@ fn bound() -> Result<(), Error> {
 
             input_graph(1, ex:p, 0) .
          ",
-        "1, 0, UNDEF, \"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>, \"false\"^^<http://www.w3.org/2001/XMLSchema#boolean>"
+        "1, 0, UNDEF, \"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>, \"false\"^^<http://www.w3.org/2001/XMLSchema#boolean>, \"false\"^^<http://www.w3.org/2001/XMLSchema#boolean>"
     )
 }
 
