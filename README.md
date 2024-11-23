@@ -29,6 +29,7 @@ Select a mode by calling the desired function in [main()](src/main.rs):
 - `_test_parsing()`: Converts a SPARQL query (`query_str`) to SPARQL algebra
 - `_test_rust()`: For trying out some Rust features
 - `_test_model()`: For trying out the Rust macro based NEMO templating language
+- `_translate_stdin()`: For reading SPARQL query from stdin printing NEMO translation to stdout
 
 Run the code using:
 ```bash
@@ -44,3 +45,9 @@ sudo apt install libssl-dev
 
 Tests need to be run with `RUST_TEST_THREADS=1` environment variable because Nemo uses timing locks where it is unknown 
 how multithreading is supported with this.
+
+### Translate queries from stdin
+- Ensure the `_translate_stdin()` function is called in main.
+- Build using `cargo +nightly build --release`
+- Use using `echo "ASK {?a ?b ?c}" | ./target/release/sparql2nemo`
+- Translation is written to stdout

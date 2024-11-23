@@ -6,6 +6,8 @@ mod translation;
 #[cfg(test)]
 mod tests;
 
+use std::io;
+use std::io::Read;
 use std::rc::Rc;
 use spargebra::algebra::GraphPattern;
 use spargebra::Query;
@@ -82,10 +84,21 @@ fn _test_rust(){
 
 fn _test_translation(){
     let query_str = "
-        prefix s: <https://xxx#>
+        prefix ex: <https://example.com/>
 
-        SELECT ?result {
-            BIND(bound(?a) as ?result)
+        SELECT DISTINCT ?a {
+            ?a ex:p ex:o .
+            FILTER NOT EXISTS {
+                ?a ex:q ex:o .
+            }
+        }
+    ";
+
+    let query_str = "
+        prefix ex: <https://example.com/>
+        SELECT DISTINCT ?a {
+            ex:x ex:p ?a
+            BIND (?a as ?b)
         }
     ";
 
@@ -98,6 +111,15 @@ fn _test_translation(){
         Err(error) => println!("{:#?}", error),
         Ok(nemo_string) => println!("{}", nemo_string),
     }
+}
+
+fn _translate_stdin(){
+    let mut input = String::new();
+    io::stdin().read_to_string(&mut input).expect("STDIN read error");
+    let query_str = input.as_str();
+
+    let result = translation::translate(query_str).expect("Translation error");
+    println!("{}", result);
 }
 
 
@@ -144,5 +166,5 @@ fn _test_model(){
 
 
 fn main() {
-    _test_translation();
+    _translate_stdin();
 }
