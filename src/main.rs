@@ -95,11 +95,12 @@ fn _test_translation(){
     ";
 
     let query_str = "
-        prefix ex: <https://example.com/>
-        SELECT DISTINCT ?a {
-            ex:x ex:p ?a
-            BIND (?a as ?b)
-        }
+        prefix ex:	<http://www.example.org/schema#>
+        prefix in:	<http://www.example.org/instance#>
+        
+       
+            select (max(?y) as ?max) where {?x ex:p ?y} 
+          
     ";
 
     println!("translating query:");

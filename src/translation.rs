@@ -1345,7 +1345,7 @@ impl QueryTranslator {
     /// - Implement remaining aggregations
     /// - Think about error during aggregation
     /// - Implement non distinct aggregations
-    fn translate_group_by(&mut self, inner: &SolutionSet, group_vars: &Vec<Variable>, aggregates: &Vec<(Variable, AggregateExpression)>) -> Result<SolutionSet, TranslateError> {
+    fn translate_group_by(&mut self, inner: &SolutionSet, inner_multi: &SolutionMultiSet, group_vars: &Vec<Variable>, aggregates: &Vec<(Variable, AggregateExpression)>) -> Result<SolutionSet, TranslateError> {
         let collect_aggregations = SolutionSet::create(
             "collect_aggregations",
             group_vars.iter().chain(aggregates.iter().map(|(v, _a)| v)).map(|v| self.sparql_vars.get(v)).collect()
@@ -1360,6 +1360,13 @@ impl QueryTranslator {
                 AggregateExpression::Sum {expr, distinct: true} => self.translate_aggregation(inner, var, expr, "sum", &group_by_vars, false),
                 AggregateExpression::Min {expr, distinct: true} => self.translate_aggregation(inner, var, expr, "min", &group_by_vars, true),
                 AggregateExpression::Max {expr, distinct: true} => self.translate_aggregation(inner, var, expr, "max", &group_by_vars, true),
+
+                AggregateExpression::Count {expr: None, distinct: false} => self.translate_count_all(inner_multi, var, group_by_vars),
+                AggregateExpression::Count {expr: Some(expr), distinct: false} => self.translate_aggregation(inner_multi, var, expr, "count", &group_by_vars, false),
+                AggregateExpression::Sum {expr, distinct: false} => self.translate_aggregation(inner_multi, var, expr, "sum", &group_by_vars, false),
+                AggregateExpression::Min {expr, distinct: false} => self.translate_aggregation(inner, var, expr, "min", &group_by_vars, true),
+                AggregateExpression::Max {expr, distinct: false} => self.translate_aggregation(inner, var, expr, "max", &group_by_vars, true),
+                
                 _ => Err(AggregationNotImplemented(aggregation.clone()))
             }?;
             body.push(to_bound_predicate(&aggregation_solution));
@@ -1643,7 +1650,8 @@ impl QueryTranslator {
             }
             GraphPattern::Group {inner, variables, aggregates} => {
                 let inner_solution = self.translate_pattern(inner)?;
-                self.translate_group_by(&inner_solution, variables, aggregates)
+                let inner_solution_multi = self.translate_pattern_multi(inner)?;
+                self.translate_group_by(&inner_solution, &inner_solution_multi, variables, aggregates)
             }
             //GraphPattern::Service {name, inner, silent} => Err(PatternNotImplemented(pattern.clone())),
             _ => Err(PatternNotImplemented(pattern.clone()))
@@ -1721,8 +1729,9 @@ impl QueryTranslator {
             GraphPattern::Group {inner, variables, aggregates} => {
                 // just use the DISTINCT implementation
                 let inner_solution = self.translate_pattern(inner)?;
-                self.translate_group_by(&inner_solution, variables, aggregates)?;
-                Ok(self.get_multi(&inner_solution))
+                let inner_solution_multi = self.translate_pattern_multi(inner)?;
+                let grouped = self.translate_group_by(&inner_solution, &inner_solution_multi, variables, aggregates)?;
+                Ok(self.get_multi(&grouped))
             }
             //GraphPattern::Service {name, inner, silent} => Err(PatternNotImplemented(pattern.clone())),
             _ => Err(MultiPatternNotImplemented(pattern.clone()))
