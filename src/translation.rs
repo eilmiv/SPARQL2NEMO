@@ -1229,6 +1229,11 @@ impl QueryTranslator {
         );
         Ok(extend)
     }
+    
+    fn translate_minus_g<T: TypedPredicate>(&mut self, left_solution: &T, right_solution: &SolutionSet) -> Result<T, TranslateError>{
+        nemo_def!(minus(@?count: ?c; ??both, ??left) :- left_solution(@?count: ?c; ??both, ??left), ~right_solution(??both, ??right); T);
+        Ok(minus)
+    }
 
     fn translate_ground_term(&mut self, term: &Option<GroundTerm>, undef_var: &Binding) -> Binding {
         #[allow(unreachable_patterns)]
@@ -1610,8 +1615,7 @@ impl QueryTranslator {
             GraphPattern::Minus {left, right} => {
                 let left_solution = self.translate_pattern(left)?;
                 let right_solution = self.translate_pattern(right)?;
-                nemo_def!(minus(??both, ??left) :- left_solution(??both, ??left), ~right_solution(??both, ??right); SolutionSet);
-                Ok(minus)
+                self.translate_minus_g(&left_solution, &right_solution)
             }
             GraphPattern::Values {variables, bindings} => {
                 Ok(self.translate_values(variables, bindings))
@@ -1651,15 +1655,13 @@ impl QueryTranslator {
     fn translate_pattern_multi(&mut self, pattern: &GraphPattern) -> Result<SolutionMultiSet, TranslateError> {
         match pattern {
             GraphPattern::Bgp{patterns} => self.translate_bgp_multi(patterns),
-            /*GraphPattern::Path {subject, path, object} =>
-                Ok(SolutionMapping::from(
-                    translate_path(
-                        state,
-                        Some(translate_node(subject)?),
-                        path,
-                        Some(translate_node(object)?)
-                    )?
-                )),*/
+            GraphPattern::Path{subject, path, object} => {
+                // Just use distinct implementation
+                let start = self.translate_term(subject, &mut vec![], &mut vec![])?;
+                let end = self.translate_term(object, &mut vec![], &mut vec![])?;
+                let distinct_result = self.translate_path(start, path, end)?;
+                Ok(self.get_multi(&distinct_result))
+            },
             GraphPattern::Join {left, right} => {
                 let left_solution = self.translate_pattern_multi(left)?;
                 let right_solution = self.translate_pattern_multi(right)?;
@@ -1689,7 +1691,11 @@ impl QueryTranslator {
                 let expr_solution = self.translate_expression(expression, &inner_solution)?;
                 self.translate_extend_g(&inner_solution, variable, &expr_solution)
             },
-            //GraphPattern::Minus {left, right} => translate_minus_multi(state, left, right),
+            GraphPattern::Minus {left, right} => {
+                let left_solution = self.translate_pattern_multi(left)?;
+                let right_solution = self.translate_pattern(right)?;
+                self.translate_minus_g(&left_solution, &right_solution)
+            }
             GraphPattern::Values {variables, bindings} => {
                 let value_seq = self.translate_values_seq(variables, bindings);
                 Ok(self.get_multi_from_sequence(&value_seq))
@@ -1712,7 +1718,12 @@ impl QueryTranslator {
                 let seq_solution = self.translate_slice_seq(&inner_solution, *start, *length);
                 Ok(self.get_multi_from_sequence(&seq_solution))
             },
-            //GraphPattern::Group {inner, variables, aggregates} => translate_group_by_multi(state, inner, variables, aggregates),
+            GraphPattern::Group {inner, variables, aggregates} => {
+                // just use the DISTINCT implementation
+                let inner_solution = self.translate_pattern(inner)?;
+                self.translate_group_by(&inner_solution, variables, aggregates)?;
+                Ok(self.get_multi(&inner_solution))
+            }
             //GraphPattern::Service {name, inner, silent} => Err(PatternNotImplemented(pattern.clone())),
             _ => Err(MultiPatternNotImplemented(pattern.clone()))
         }
@@ -1734,7 +1745,6 @@ impl QueryTranslator {
                 let expr_solution = self.translate_expression(expression, &inner_solution)?;
                 self.translate_extend_g(&inner_solution, variable, &expr_solution)
             },
-            //Minus
             GraphPattern::Values {variables, bindings} => {
                 Ok(self.translate_values_seq(variables, bindings))
             },
@@ -1757,7 +1767,8 @@ impl QueryTranslator {
             | GraphPattern::Join {left: _, right: _}
             | GraphPattern::LeftJoin {left: _, right: _, expression: _}
             | GraphPattern::Group {aggregates: _, variables: _, inner: _}
-            | GraphPattern::Filter {expr: _, inner: _}
+            | GraphPattern::Filter {expr: _, inner: _} 
+            | GraphPattern::Minus {left: _, right: _}
             => {
                 let inner_solution = self.translate_pattern_multi(pattern)?;
                 Ok(self.get_sequence_from_multi(&inner_solution))
