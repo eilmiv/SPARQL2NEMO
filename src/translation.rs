@@ -1230,6 +1230,9 @@ impl QueryTranslator {
         Ok(extend)
     }
     
+    // TODO: wrong, no UNDEF handling
+    // - maybe use left join
+    // - maybe use map_unbound like for join
     fn translate_minus_g<T: TypedPredicate>(&mut self, left_solution: &T, right_solution: &SolutionSet) -> Result<T, TranslateError>{
         nemo_def!(minus(@?count: ?c; ??both, ??left) :- left_solution(@?count: ?c; ??both, ??left), ~right_solution(??both, ??right); T);
         Ok(minus)
@@ -1473,7 +1476,9 @@ impl QueryTranslator {
         let sorted_strings = self.radix_sort(strings);
 
         // build sort table
-        nemo_def!(num(?undef; @result: 0) :- undef(?undef); SolutionExpression);
+        let val = VarPtr::new("val");
+        let order_score = VarPtr::new("order_score");
+        nemo_declare!(num(val, order_score); SolutionExpression);
         for (expr, _negated) in &sort_expressions {
             nemo_add!(num(r; @result: ?i) :- expr(??vars; @result: r), sorted_strings(nemo_call!(STR; r); @result: ?i), {nemo_condition!(nemo_call!(isNumeric; r), " = ", false)});
             nemo_add!(num(r; @result: r) :- expr(??vars; @result: r), {nemo_condition!(nemo_call!(isNumeric; r), " = ", true)});

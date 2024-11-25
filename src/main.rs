@@ -97,11 +97,11 @@ fn _test_translation(){
     let query_str = "
         prefix ex:	<http://www.example.org/>
         
-        select ?a 
+        select ?a
         WHERE {
-            ?a ex:p ex:o .
+            ?a ex:p ?b .
         }
-        ORDER BY ?a
+        ORDER BY ?a ?b
     ";
 
     println!("translating query:");
@@ -168,5 +168,5 @@ fn _test_model(){
 
 
 fn main() {
-    _test_translation();
+    _translate_stdin();
 }
