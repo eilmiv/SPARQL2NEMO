@@ -1230,12 +1230,65 @@ impl QueryTranslator {
         Ok(extend)
     }
     
-    // TODO: wrong, no UNDEF handling
-    // - maybe use left join
-    // - maybe use map_unbound like for join
+    // similar to EXISTS
+    // old implementation used just negation and did not work on undef
+    // old implementation maybe could error when variable is in right but not left because unsafe variable
     fn translate_minus_g<T: TypedPredicate>(&mut self, left_solution: &T, right_solution: &SolutionSet) -> Result<T, TranslateError>{
-        nemo_def!(minus(@?count: ?c; ??both, ??left) :- left_solution(@?count: ?c; ??both, ??left), ~right_solution(??both, ??right); T);
-        Ok(minus)
+        let overlapping_terms: Vec<_> = get_vars(left_solution).into_iter().filter(|v| get_vars(right_solution).contains(v)).collect();
+        let mut maps = nemo_atoms![];
+        let mut right_bindings = get_vars(right_solution);
+        let mut overlapping_def = false;
+        let mut num_def = Binding::from(0);
+        let undef_var = nemo_var!(undef);
+        for v in &overlapping_terms {
+            // the right variable gets stored into thees positions by unbound_combination_left_focus
+            let right_var_posses = var_posses(&right_bindings, v);
+            // there must be one because v is in overlapping_terms
+            let right_var_pos = right_var_posses[0];
+            
+            if (!has_prop_for_var(left_solution, IS_DEFINED, v)) || !has_prop_for_var(right_solution, IS_DEFINED, v) {
+                maps = nemo_atoms![maps, &self.unbound_combinations_left_focus(v.clone(), left_solution, right_solution, &mut right_bindings)];
+            }
+            else {
+                overlapping_def = true;
+            }
+            
+            let mut this_def = None;
+            if !has_prop_for_var(left_solution, IS_DEFINED, v) {
+                this_def = Some(nemo_call!(ABS; nemo_call!(COMPARE; nemo_call!(fullStr; v.clone()), nemo_call!(fullStr; undef_var.clone()))));
+            }
+            if !has_prop_for_var(right_solution, IS_DEFINED, v) {
+                let var_right = &right_bindings[right_var_pos];
+                let right_def = nemo_call!(ABS; nemo_call!(COMPARE; nemo_call!(fullStr; var_right.clone()), nemo_call!(fullStr; undef_var.clone())));
+                if let Some(this_def_num) = this_def {
+                    this_def = Some(this_def_num * right_def)
+                }
+                else {
+                    this_def = Some(right_def)
+                }
+            }
+            
+            if let Some(this_def_num) = this_def {
+                num_def = num_def + this_def_num;
+            }
+        }
+        
+        let disjoint_domain_filter = if overlapping_def {
+            nemo_atoms![]
+        } else {
+            let undef_pred = self.undefined_val.clone();
+            let undef_bound = BoundPredicate::new(undef_pred.get_predicate(), nemo_terms![undef_var].bindings(), false);
+            nemo_atoms![&undef_bound, nemo_condition!(num_def, " > ", 0)]
+        };
+        nemo_def!(to_remove(??minus_vars) :- {maps}, left_solution(@?count: ?c; ??minus_vars), right_solution(right_bindings), {disjoint_domain_filter}; SolutionSet);
+        nemo_def!(minus(@?count: ?c; ??minus_vars) :- left_solution(@?count: ?c; ??minus_vars), ~to_remove(??minus_vars); T);
+        
+        if overlapping_terms.is_empty() {
+            nemo_def!(minus(??minus_vars) :- left_solution(??minus_vars); T);
+            Ok(minus)
+        } else {
+            Ok(minus)
+        }
     }
 
     fn translate_ground_term(&mut self, term: &Option<GroundTerm>, undef_var: &Binding) -> Binding {

@@ -2352,6 +2352,60 @@ fn minus() -> Result<(), Error> {
 }
 
 #[test]
+fn minus_unbound() -> Result<(), Error> {
+    // from sparql test suite
+    assert_sparql(
+        "
+            prefix : <https://example.com/>
+
+            select DISTINCT ?a ?b ?c {
+              ?a a :Min
+              OPTIONAL { ?a :p1 ?b }
+              OPTIONAL { ?a :p2 ?c }
+              MINUS {
+                ?d a :Sub
+                OPTIONAL { ?d :q1 ?b }
+                OPTIONAL { ?d :q2 ?c }
+              }
+            }
+        ",
+        "
+            @prefix ex: <https://example.com/> .
+            @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+
+
+            input_graph(ex:a1, rdf:type, ex:Min) .
+            input_graph(ex:a1, ex:p1, ex:b1) .
+
+            input_graph(ex:a2, rdf:type, ex:Min) .
+            input_graph(ex:a2, ex:p1, ex:b2) .
+
+            input_graph(ex:a3, rdf:type, ex:Min) .
+            input_graph(ex:a3, ex:p1, ex:b3) .
+
+            input_graph(ex:a4, rdf:type, ex:Min) .
+
+
+
+            input_graph(ex:d1, rdf:type, ex:Sub) .
+            input_graph(ex:d1, ex:q1, ex:b1) .
+
+            input_graph(ex:d3, rdf:type, ex:Sub) .
+            input_graph(ex:d3, ex:q1, ex:b3) .
+            input_graph(ex:d3, ex:q2, ex:c3) .
+
+            input_graph(ex:d4, rdf:type, ex:Sub) .
+            input_graph(ex:d4, ex:q1, ex:b4) .
+            input_graph(ex:d4, ex:q2, ex:c4) .
+
+            input_graph(ex:d5, rdf:type, ex:Sub) .
+
+         ",
+        "<https://example.com/a2>, <https://example.com/b2>, UNDEF; <https://example.com/a4>, UNDEF, UNDEF"
+    )
+}
+
+#[test]
 fn values() -> Result<(), Error> {
     // note: values tuple with missing value in tuple is parsing error
     assert_sparql(
@@ -2712,7 +2766,7 @@ fn order_by_multi_type() -> Result<(), Error> {
 
                     (1 \"abc\")
                     (\"o\" \"xyz\")
-                    (1 \"abc\")
+                    (ex:a \"abc\")
 
                     (-1 0.3e0)
                     (10000 4.3e0)
@@ -2720,12 +2774,12 @@ fn order_by_multi_type() -> Result<(), Error> {
                 }
             }
             ORDER BY DESC(-?b) ?a
-        ",
+        ",  // note that strings are Error when negated hence sorting by ?a in first three rows
         "",
         "[
+            <https://example.com/a>, \"abc\"
+            1, \"abc\"
             \"o\", \"xyz\"
-            1, \"abc\"
-            1, \"abc\"
             \"o\", 0
             \"q\", 0
             -2, \"0.3\"^^<http://www.w3.org/2001/XMLSchema#double>
