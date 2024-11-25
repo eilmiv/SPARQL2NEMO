@@ -95,12 +95,13 @@ fn _test_translation(){
     ";
 
     let query_str = "
-        prefix ex:	<http://www.example.org/schema#>
-        prefix in:	<http://www.example.org/instance#>
+        prefix ex:	<http://www.example.org/>
         
-       
-            select (max(?y) as ?max) where {?x ex:p ?y} 
-          
+        select ?a 
+        WHERE {
+            ?a ex:p ex:o .
+        }
+        ORDER BY ?a
     ";
 
     println!("translating query:");
@@ -167,5 +168,5 @@ fn _test_model(){
 
 
 fn main() {
-    _translate_stdin();
+    _test_translation();
 }

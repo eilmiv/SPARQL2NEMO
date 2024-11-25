@@ -1387,7 +1387,7 @@ impl QueryTranslator {
         let bnode = 4 * nemo_call!(INT; nemo_call!(isNull; v));
         let iri = 3 * nemo_call!(INT; nemo_call!(isIri; v));
         let number = 2 * nemo_call!(INT; nemo_call!(isNumeric; v));
-        let string = 4 * nemo_call!(INT; nemo_call!(isString; v));
+        let string = 1 * nemo_call!(INT; nemo_call!(isString; v));
         nemo_def!(type_score(v, 0 - bnode - iri - number - string ) :- to_score(v), ~undef(v); SolutionExpression);
         nemo_add!(type_score(?undef, -5) :- undef(?undef));
         type_score
@@ -1407,11 +1407,13 @@ impl QueryTranslator {
         let child = nemo_var!(child);
         let parent = nemo_var!(parent);
         let other = nemo_var!(other);
+        let a = nemo_var!(a);
+        let b = nemo_var!(b);
 
         nemo_def!(l(%max(nemo_call!(STRLEN; s))) :- input(s); SolutionSet);
 
         nemo_def!(has_child("", 0, ?l, ?s) :- input(?s), l(?l); SolutionSet);
-        nemo_def!(multiple_children(?parent, ?start, ?end) :- has_child(?parent, ?start, ?end, ?a), has_child(?parent, ?start, ?end, ?b), {nemo_condition!(?a, " != ", ?b)}; SolutionSet);
+        nemo_def!(multiple_children(?parent, ?start, ?end) :- has_child(?parent, ?start, ?end, a), has_child(?parent, ?start, ?end, b), {nemo_condition!(a, " != ", b)}; SolutionSet);
         nemo_def!(split(?parent, start, start.clone() + (end.clone() - start.clone()) / 2, end) :- multiple_children(?parent, start, end), {nemo_condition!(end.clone() - start.clone(), " >= ", 2)}; SolutionSet);
         nemo_add!(
             has_child(parent, start.clone(), mid.clone(), mid_str.clone()) :-
@@ -1471,11 +1473,11 @@ impl QueryTranslator {
         let sorted_strings = self.radix_sort(strings);
 
         // build sort table
-        nemo_def!(num(?s; @result: ?i) :- sorted_strings(?s; @result: ?i); SolutionExpression);
+        nemo_def!(num(?undef; @result: 0) :- undef(?undef); SolutionExpression);
         for (expr, _negated) in &sort_expressions {
+            nemo_add!(num(r; @result: ?i) :- expr(??vars; @result: r), sorted_strings(nemo_call!(STR; r); @result: ?i), {nemo_condition!(nemo_call!(isNumeric; r), " = ", false)});
             nemo_add!(num(r; @result: r) :- expr(??vars; @result: r), {nemo_condition!(nemo_call!(isNumeric; r), " = ", true)});
         }
-        nemo_add!(num(?undef; @result: 0) :- undef(?undef));
         let type_score = self.type_score(&num, num.depend_vars());
         let mut head: Vec<Binding> = Vec::new();
         let mut body = nemo_atoms![];
