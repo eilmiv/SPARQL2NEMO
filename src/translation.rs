@@ -1400,7 +1400,6 @@ impl QueryTranslator {
     /// - Note: aggregation somewhat different in spargebra vs. SPARQL semantic
     /// - Implement remaining aggregations
     /// - Think about error during aggregation
-    /// - Implement non distinct aggregations
     fn translate_group_by(&mut self, inner: &SolutionSet, inner_multi: &SolutionMultiSet, group_vars: &Vec<Variable>, aggregates: &Vec<(Variable, AggregateExpression)>) -> Result<SolutionSet, TranslateError> {
         let collect_aggregations = SolutionSet::create(
             "collect_aggregations",

@@ -18,13 +18,12 @@ use crate::nemo_model::{Basic, construct_program};
 
 fn _test_parsing() {
     let query_str = "
-        prefix s: <https://xxx#>
+        prefix ex: <https://example.com/>
 
-        select ?a ?b  where {
-            VALUES (?a ?b) {(1 2) (2 1)}
+        SELECT DISTINCT (SUM(DISTINCT ?a) as ?s)
+        WHERE {
+            ?a ex:p ?b .
         }
-        ORDER BY ?b
-
     ";
     let query = Query::parse(query_str, None).unwrap();
 
@@ -95,14 +94,13 @@ fn _test_translation(){
     ";
 
     let query_str = "
-        prefix ex:	<http://www.example.org/>
-        prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
-        
-        select ?a
-        WHERE {
+        prefix ex: <https://example.com/>
+
+        SELECT DISTINCT (SUM(DISTINCT ?a) as ?s) (COUNT(DISTINCT ?a) as ?c) ?b
+         WHERE {
             ?a ex:p ?b .
         }
-        ORDER BY ?a ?b
+        GROUP BY ?b
     ";
 
     println!("translating query:");
@@ -131,7 +129,7 @@ nemo_predicate_type!(PTF2 = f1 f2 ... f3 f4);
 
 fn _test_model(){
     let a = nemo_model::Variable::create("a");
-    let b = nemo_model::Variable::create("b");
+    /*let b = nemo_model::Variable::create("b");
     let x = "abc".to_string();
     nemo_declare!(p(a, b));
     nemo_add!(p(x, true));
@@ -164,7 +162,11 @@ fn _test_model(){
     print!("{}", construct_program(&h));
 
     nemo_def!(i(?x, ?b) :- ~p(?x, ?b), ~{&p}, {nemo_filter!("", ?x, " < ", 1, "")}; Basic);
-    print!("{}", construct_program(&i));
+    print!("{}", construct_program(&i));*/
+    
+    nemo_declare!(p(a));
+    nemo_def!(q(?x, ??*y) :- p(?x), p(??*y); Basic);
+    print!("{}", construct_program(&q));
 }
 
 

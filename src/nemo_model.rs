@@ -1839,8 +1839,9 @@ impl RuleBuilder {
                             new_bindings.push(ProtoBinding::Binding(Binding::Variable(var.clone())))
                         }
                         else {
-                            new_bindings.push(ProtoBinding::Binding(Binding::Variable(var.distinct_new())));
-                            rename_set_variables.entry(my_rename_set.clone()).or_insert_with(Vec::new).push(var.clone());
+                            let new_var = var.distinct_new();
+                            new_bindings.push(ProtoBinding::Binding(Binding::Variable(new_var.clone())));
+                            rename_set_variables.entry(my_rename_set.clone()).or_insert_with(Vec::new).push(new_var);
                         }
                     }
                     new_bindings.extend(end.iter().cloned());
@@ -1969,6 +1970,7 @@ macro_rules! nemo_def {
 
             $(
                 $(??$head_var_set:ident)?
+                $(??*$head_rename_set:ident)?
                 $(?$head_connection_name:ident)?
                 $(%$head_aggregate:ident(
                     $(
@@ -2109,6 +2111,11 @@ macro_rules! nemo_def {
                 $(
                     crate::nemo_model::ProtoBinding::VariableSet(
                         stringify!($head_var_set).to_string()
+                    )
+                )?
+                $(
+                    crate::nemo_model::ProtoBinding::RenameSet(
+                        stringify!($head_rename_set).to_string()
                     )
                 )?
                 $(
