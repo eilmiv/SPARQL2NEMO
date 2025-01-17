@@ -5,7 +5,7 @@ Translation to SPARQL algebra uses [spargebra](https://docs.rs/spargebra/latest/
 [oxigraph](https://docs.rs/oxigraph/latest/oxigraph/) graph database.
 
 ## Supported Features
-Currently supported features can be found in [translation.rs](src/translation.rs).
+Translation implementations for SPARQL Features can be found in [translation.rs](src/translation.rs).
 Functions are generally named after the SPARQL algebra operation they translate. 
 
 There are special suffixes for functions that do not produce solution sets:
@@ -15,13 +15,11 @@ There are special suffixes for functions that do not produce solution sets:
 - `*_multi_g` for generic implementations supporting solution multiset and regular solution sets
 - `*_seq_g` for generic implementations supporting solution sequences and regular solutions sets
 
-There are currently many known issues with the existing implementations. 
-
 You may also look at the example queries in [tests.rs](src/tests.rs).
 
 ## Usage
-There is currently no explicit UI. 
-The output NEMO program is currently printed to stdout and needs to be combined with the graph data and executed manually. 
+There is no explicit UI. 
+The output NEMO program is printed to stdout and needs to be combined with the graph data and executed manually. 
 The input graph is currently provided in NEMO as the ternary predicate `input_graph(?subject, ?predicate, ?object)`.
 
 Select a mode by calling the desired function in [main()](src/main.rs):
