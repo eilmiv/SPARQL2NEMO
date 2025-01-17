@@ -1,11 +1,12 @@
 # SPARQL2NEMO Converter
-Transforms a given [SPARQL query](https://www.w3.org/TR/sparql11-query/) to [NEMO](https://github.com/knowsys/nemo) code. 
+Transforms a given [SPARQL query](https://www.w3.org/TR/sparql11-query/) to [Nemo](https://github.com/knowsys/nemo) code. 
 The program works by transforming operations of the SPARQL algebra recursively. 
 Translation to SPARQL algebra uses [spargebra](https://docs.rs/spargebra/latest/spargebra/) which is developed as part of the 
-[oxigraph](https://docs.rs/oxigraph/latest/oxigraph/) graph database.
+[Oxigraph](https://docs.rs/oxigraph/latest/oxigraph/) graph database.
 
 ## Supported Features
 Translation implementations for SPARQL Features can be found in [translation.rs](src/translation.rs).
+A [German explanation](SPARQL2Nemo_explenation.pdf) how the Translation works is included in the Repository.
 Functions are generally named after the SPARQL algebra operation they translate. 
 
 There are special suffixes for functions that do not produce solution sets:
