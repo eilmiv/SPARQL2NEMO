@@ -1,0 +1,20 @@
+# This CITATION.cff file was generated with cffinit.
+# Visit https://bit.ly/cffinit to generate yours today!
+
+cff-version: 1.2.0
+title: SPARQL2NEMO
+message: >-
+  If you use this software, please cite it using the
+  metadata from this file.
+type: software
+authors:
+  - given-names: Martin
+    family-names: Voigt
+    orcid: 'https://orcid.org/0000-0001-5556-838X'
+    affiliation: TU Dresden
+abstract: >-
+  Transforms a given SPARQL query to Nemo code. 
+
+  The program works by transforming operations of the SPARQL
+  algebra recursively. 
+license: MIT
