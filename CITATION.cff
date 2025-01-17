@@ -13,7 +13,7 @@ authors:
     orcid: 'https://orcid.org/0000-0001-5556-838X'
     affiliation: TU Dresden
 abstract: >-
-  Transforms a given SPARQL query to Nemo code. 
+  SPARQL2NEMO Transforms a given SPARQL query to Nemo code.
 
   The program works by transforming operations of the SPARQL
   algebra recursively. 
