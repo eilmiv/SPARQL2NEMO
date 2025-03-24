@@ -175,5 +175,5 @@ fn _test_model(){
 
 
 fn main() {
-    _test_translation();
+    _translate_stdin();
 }
