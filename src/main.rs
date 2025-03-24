@@ -95,12 +95,12 @@ fn _test_translation(){
 
     let query_str = "
         prefix ex: <https://example.com/>
+        prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#rest>
 
-        SELECT DISTINCT (SUM(DISTINCT ?a) as ?s) (COUNT(DISTINCT ?a) as ?c) ?b
-         WHERE {
-            ?a ex:p ?b .
+        SELECT DISTINCT ?x (SUM(coalesce(?a, 1, 3)) as ?s) {
+            ?x ex:p ?a
         }
-        GROUP BY ?b
+        GROUP BY ?x
     ";
 
     println!("translating query:");
@@ -126,6 +126,8 @@ fn _translate_stdin(){
 
 nemo_predicate_type!(PTF = f1 f2 ... f3 f4);
 nemo_predicate_type!(PTF2 = f1 f2 ... f3 f4);
+
+nemo_predicate_type!(MyABCType = a b ... c);
 
 fn _test_model(){
     let a = nemo_model::Variable::create("a");
@@ -164,12 +166,14 @@ fn _test_model(){
     nemo_def!(i(?x, ?b) :- ~p(?x, ?b), ~{&p}, {nemo_filter!("", ?x, " < ", 1, "")}; Basic);
     print!("{}", construct_program(&i));*/
     
-    nemo_declare!(p(a));
-    nemo_def!(q(?x, ??*y) :- p(?x), p(??*y); Basic);
-    print!("{}", construct_program(&q));
+    nemo_declare!(existing_predicate(a));
+    // Rule Start
+    nemo_def!(new_predicate(?x) :- existing_predicate(?x); Basic);
+    // Rule end
+    print!("{}", construct_program(&new_predicate));
 }
 
 
 fn main() {
-    _translate_stdin();
+    _test_translation();
 }

@@ -1582,7 +1582,7 @@ impl RuleBuilder {
 
     pub fn set_property_name(&mut self, name: &str){
         self.predicate_name = name.to_string()
-    }
+    }  // rename to set_predicate_name
 
     pub fn add_head_binding(&mut self, binding: ProtoBinding){
         self.head.push(binding)
