@@ -19,12 +19,12 @@ There are special suffixes for functions that do not produce solution sets:
 You may also look at the example queries in [tests.rs](src/tests.rs).
 
 ### Known differences to SPARQL standard
-- No support for FROM Clause and other Graph management features
-- No support for using variables in an EXISTS expression that are only defined outside the EXISTS expression
-- Empty In-Expression can error e.g. 0/0 in () evaluates to an error but should be false
-- DISTINCT and REDUCED do not preserve orders previously given by ORDER BY
+- No support for `FROM` Clause and other Graph management features
+- No support for using variables in an `EXISTS` expression that are only defined outside the `EXISTS` expression
+- Empty `In`-Expression can error e.g. `0/0 in ()` evaluates to an error but should be `false`
+- `DISTINCT` and `REDUCED` do not preserve orders previously given by `ORDER BY`
 - In some cases an incorrect type of equality is used but explicit equality checking and graph pattern matching should work correctly
-- GROUP BY does not support grouping by all variables
+- `GROUP BY` does not support grouping by all variables
 - Some symbols in Variable names may be not supported
 - Literals may not be handled completely in line with SPARQL
   - Nemo applies some normalization to literals which may change results in some cases, there are nor malformed literals
