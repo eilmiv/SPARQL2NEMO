@@ -18,6 +18,24 @@ There are special suffixes for functions that do not produce solution sets:
 
 You may also look at the example queries in [tests.rs](src/tests.rs).
 
+### Known differences to SPARQL standard
+- No support for FROM Clause and other Graph management features
+- No support for using variables in an EXISTS expression that are only defined outside the EXISTS expression
+- Empty In-Expression can error e.g. 0/0 in () evaluates to an error but should be false
+- DISTINCT and REDUCED do not preserve orders previously given by ORDER BY
+- In some cases an incorrect type of equality is used but explicit equality checking and graph pattern matching should work correctly
+- GROUP BY does not support grouping by all variables
+- Some symbols in Variable names may be not supported
+- Literals may not be handled completely in line with SPARQL
+  - Nemo applies some normalization to literals which may change results in some cases, there are nor malformed literals
+  - Nemo does not apply numeric type promotion and subtype substitution rules from SPARQL
+  - Function and operators may not have standard compliant input/output types
+  - Only minimal support for xsd:decimal
+  - Only minimal support for language tagged strings
+- Some functions and aggregations are not implemented
+- Comparisons do not work for Datetime values
+- Some Nemo functions are not Standard compliant
+
 ## Usage
 There is no explicit UI. 
 The output NEMO program is printed to stdout and needs to be combined with the graph data and executed manually. 
@@ -44,6 +62,8 @@ sudo apt install libssl-dev
 
 Tests need to be run with `RUST_TEST_THREADS=1` environment variable because Nemo uses timing locks where it is unknown 
 how multithreading is supported with this.
+
+Note that this code works with an [old version of Nemo](https://github.com/knowsys/nemo/tree/36ca7d40295203099db04a501642b4686b2f2009)
 
 ### Translate queries from stdin
 - Ensure the `_translate_stdin()` function is called in main.
