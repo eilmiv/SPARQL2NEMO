@@ -19,12 +19,12 @@ There are special suffixes for functions that do not produce solution sets:
 You may also look at the example queries in [tests.rs](src/tests.rs).
 
 ### Known differences to SPARQL 1.1 Query standard
-- No support for `FROM` clause and other ǵraph management features
+- No support for `FROM` clause and other graph management features
 - No support for using variables in an `EXISTS` expression that are only defined outside the `EXISTS` expression
 - Empty `In`-expression can error e.g. `0/0 in ()` evaluates to an error but should be `false`
 - `DISTINCT` and `REDUCED` do not preserve orders previously given by `ORDER BY`
 - In some cases an incorrect type of equality is used - explicit equality checking and graph pattern matching should work correctly
-- `GROUP BY` does not support grouping by all variables
+- `GROUP BY` does not support grouping by all variables simultaneously
 - Some symbols in variable names may be not supported
 - Literals may not be handled completely in line with SPARQL
   - Nemo applies some normalization to literals which may change results in some cases, there are no malformed literals
@@ -34,7 +34,7 @@ You may also look at the example queries in [tests.rs](src/tests.rs).
   - Only minimal support for language tagged strings
 - Some functions and aggregations are not implemented
 - Comparisons do not work for Datetime values
-- Some Nemo functions are not Standard compliant
+- Some Nemo functions are not Standard compliant e.g. Nemo uses a simpler regex syntax
 
 ## Usage
 There is no explicit UI. 
